@@ -65,8 +65,7 @@ final class AdapterInvocationTests: XCTestCase {
       invocation.environment[AdapterInvocationFactory.requestDirectoryEnvironmentKey],
       invocation.requestDirectoryURL.path
     )
-    XCTAssertNil(basePlan.targets[0].sourceProductURL)
-    XCTAssertNil(basePlan.targets[0].destinationProductURL)
+    XCTAssertNil(basePlan.targets[0].productPaths)
 
     let secondPlan = ResolvedBuildPlan(
       adapterRequest: request,

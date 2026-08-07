@@ -98,6 +98,10 @@ final class ManifestFixture {
     arch: String = "arm64",
     bazelLabel: String = "//app:App",
     configuration: String = "Debug",
+    materialization: String = "copy_tree",
+    productBasename: String = "App.app",
+    productName: String = "App",
+    productType: String = "com.apple.product-type.application",
     targetID: String = "app-app",
     xcodeTargetGUID: String = "APP_GUID"
   ) -> [String: Any] {
@@ -109,11 +113,11 @@ final class ManifestFixture {
       "outputGroup": "bp \(targetID)",
       "previewOutputGroups": ["bc \(targetID)", "bp \(targetID)", "bl \(targetID)"],
       "product": [
-        "basename": "App.app",
-        "materialization": "copy_tree",
-        "name": "App",
-        "path": "bazel-out/products/App.app",
-        "type": "com.apple.product-type.application",
+        "basename": productBasename,
+        "materialization": materialization,
+        "name": productName,
+        "path": "bazel-out/products/\(productBasename)",
+        "type": productType,
       ],
       "targetID": targetID,
       "variant": [
@@ -182,11 +186,7 @@ final class ManifestFixture {
       manifestURL: manifestURL,
       operationID: operationID,
       targets: [
-        ResolvedTargetPlan(
-          destinationProductURL: nil,
-          mapping: mapping,
-          sourceProductURL: nil
-        )
+        ResolvedTargetPlan(mapping: mapping, productPaths: nil)
       ]
     )
   }

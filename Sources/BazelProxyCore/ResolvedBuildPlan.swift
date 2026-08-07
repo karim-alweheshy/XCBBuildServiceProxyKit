@@ -13,19 +13,39 @@ public struct AdapterRequest: Equatable, Sendable {
   }
 }
 
-public struct ResolvedTargetPlan: Equatable, Sendable {
-  public let destinationProductURL: URL?
-  public let mapping: BuildProxyManifest.Target
-  public let sourceProductURL: URL?
+/// Evaluated product paths supplied by the bridge as one indivisible trust boundary.
+///
+/// Core verifies both leaf URLs against the declared roots before copying or cleaning. It never
+/// treats an arbitrary absolute leaf URL as authority to mutate that path.
+public struct ResolvedProductPaths: Equatable, Sendable {
+  public let bazelOutputRootURL: URL
+  public let destinationProductURL: URL
+  public let fullProductName: String
+  public let sourceProductURL: URL
+  public let targetBuildDirectoryURL: URL
 
   public init(
-    destinationProductURL: URL?,
-    mapping: BuildProxyManifest.Target,
-    sourceProductURL: URL?
+    bazelOutputRootURL: URL,
+    destinationProductURL: URL,
+    fullProductName: String,
+    sourceProductURL: URL,
+    targetBuildDirectoryURL: URL
   ) {
+    self.bazelOutputRootURL = bazelOutputRootURL
     self.destinationProductURL = destinationProductURL
-    self.mapping = mapping
+    self.fullProductName = fullProductName
     self.sourceProductURL = sourceProductURL
+    self.targetBuildDirectoryURL = targetBuildDirectoryURL
+  }
+}
+
+public struct ResolvedTargetPlan: Equatable, Sendable {
+  public let mapping: BuildProxyManifest.Target
+  public let productPaths: ResolvedProductPaths?
+
+  public init(mapping: BuildProxyManifest.Target, productPaths: ResolvedProductPaths?) {
+    self.mapping = mapping
+    self.productPaths = productPaths
   }
 }
 
