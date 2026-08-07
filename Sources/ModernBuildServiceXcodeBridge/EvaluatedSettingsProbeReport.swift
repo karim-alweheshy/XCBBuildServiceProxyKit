@@ -9,6 +9,7 @@ public enum EvaluatedSettingsProbeStatus: String, Codable, Sendable {
 }
 
 public enum EvaluatedSettingsProbeFailureCode: String, Codable, Sendable {
+  case auxiliaryChannelUnavailable = "auxiliary_channel_unavailable"
   case capturedPayloadTooLarge = "captured_payload_too_large"
   case createBuildDecodeFailed = "create_build_decode_failed"
   case invalidManifest = "invalid_manifest"

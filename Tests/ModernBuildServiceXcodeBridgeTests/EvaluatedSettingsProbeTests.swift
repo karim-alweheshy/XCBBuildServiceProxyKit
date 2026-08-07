@@ -28,7 +28,9 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       send: { frame in
         serviceBoundFrames.append(frame)
         let exportedRequest = try decodeExportedSettingsRequest(frame)
-        XCTAssertEqual(frame.channel, original.channel)
+        XCTAssertNotEqual(frame.channel, original.channel)
+        XCTAssertNotEqual(frame.channel, request.responseChannel)
+        XCTAssertGreaterThanOrEqual(frame.channel, UInt64(1) << 63)
         XCTAssertEqual(exportedRequest.targetGUID, "TARGET-A")
         XCTAssertEqual(exportedRequest.parameters, request.request.parameters)
         var environment = makeExportedEnvironment(
@@ -46,7 +48,7 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     serviceBoundFrames.append(original)
 
     XCTAssertEqual(serviceBoundFrames.count, 2)
-    XCTAssertEqual(serviceBoundFrames[0].channel, original.channel)
+    XCTAssertNotEqual(serviceBoundFrames[0].channel, original.channel)
     XCTAssertEqual(serviceBoundFrames[1], original)
 
     let report = try fixture.readReport()
@@ -161,11 +163,13 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     )
     var requestIndex = 0
     var decodedParameters: [BuildParametersMessagePayload] = []
+    var auxiliaryChannels: [UInt64] = []
 
     let consumed = try probe.intercept(
       direction: .clientToService,
       frame: original,
       send: { frame in
+        auxiliaryChannels.append(frame.channel)
         let exportedRequest = try decodeExportedSettingsRequest(frame)
         decodedParameters.append(exportedRequest.parameters)
         let environment = makeExportedEnvironment(
@@ -185,6 +189,9 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
 
     XCTAssertFalse(consumed)
     XCTAssertEqual(requestIndex, 2)
+    XCTAssertEqual(Set(auxiliaryChannels).count, 2)
+    XCTAssertFalse(auxiliaryChannels.contains(original.channel))
+    XCTAssertFalse(auxiliaryChannels.contains(request.responseChannel))
     XCTAssertEqual(decodedParameters, [request.request.parameters, targetOverride])
     let report = try fixture.readReport()
     XCTAssertEqual(report.status, .failed)
@@ -296,7 +303,7 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     XCTAssertFalse(reportText.contains("synthetic-error"))
   }
 
-  func testTimeoutForwardsCreateAndConsumesLateMatchingResponse() throws {
+  func testTimeoutForwardsCreateAndDoesNotConsumeNativeBuildCreated() throws {
     let fixture = try ProbeFixture(environmentKeys: [])
     defer { fixture.remove() }
     let probe = try fixture.makeProbe(timeout: 0.001)
@@ -317,8 +324,28 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
 
     XCTAssertFalse(consumed)
     XCTAssertEqual(try fixture.readReport().failureCodes, [.timeout])
+    let auxiliaryFrame = try XCTUnwrap(injectedFrame)
+    XCTAssertNotEqual(auxiliaryFrame.channel, original.channel)
+
+    let buildCreated = BuildServiceRawFrame(
+      channel: original.channel,
+      payload: SwiftBuildProtocolCodec.encode(BuildCreated(id: 1)),
+      messageName: BuildCreated.name
+    )
+    XCTAssertFalse(
+      probe.shouldIntercept(
+        direction: .serviceToClient,
+        channel: buildCreated.channel,
+        payloadLength: UInt32(buildCreated.payload.count),
+        messageName: buildCreated.messageName
+      )
+    )
+    XCTAssertFalse(
+      try probe.intercept(direction: .serviceToClient, frame: buildCreated, send: { _ in })
+    )
+
     let lateResponse = BuildServiceRawFrame(
-      channel: try XCTUnwrap(injectedFrame).channel,
+      channel: auxiliaryFrame.channel,
       payload: SwiftBuildProtocolCodec.encode(
         AllExportedMacrosAndValuesResponse(result: makeExportedEnvironment())
       ),
@@ -383,11 +410,17 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       payload: SwiftBuildProtocolCodec.encode(request)
     )
 
+    var auxiliaryFrame: BuildServiceRawFrame?
     XCTAssertFalse(
-      try probe.intercept(direction: .clientToService, frame: original, send: { _ in })
+      try probe.intercept(
+        direction: .clientToService,
+        frame: original,
+        send: { auxiliaryFrame = $0 }
+      )
     )
+    let auxiliaryChannel = try XCTUnwrap(auxiliaryFrame).channel
     let lateUnexpected = BuildServiceRawFrame(
-      channel: original.channel,
+      channel: auxiliaryChannel,
       payload: SwiftBuildProtocolCodec.encode(BoolResponse(false)),
       messageName: BoolResponse.name
     )
@@ -401,11 +434,55 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     XCTAssertFalse(
       probe.shouldIntercept(
         direction: .serviceToClient,
-        channel: original.channel,
+        channel: auxiliaryChannel,
         payloadLength: 1,
         messageName: BoolResponse.name
       )
     )
+  }
+
+  func testAuxiliaryChannelSkipsObservedRequestAndResponseChannels() throws {
+    let fixture = try ProbeFixture(environmentKeys: [])
+    defer { fixture.remove() }
+    let probe = try fixture.makeProbe()
+    let observedChannel = UInt64.max
+    let responseChannel = UInt64.max - 1
+    let requestChannel = UInt64.max - 2
+
+    XCTAssertFalse(
+      probe.shouldIntercept(
+        direction: .clientToService,
+        channel: observedChannel,
+        payloadLength: 1,
+        messageName: "PING"
+      )
+    )
+    let request = makeCreateBuildRequest(
+      targets: [ConfiguredTargetMessagePayload(guid: "TARGET-A", parameters: nil)],
+      responseChannel: responseChannel
+    )
+    let original = BuildServiceRawFrame(
+      channel: requestChannel,
+      payload: SwiftBuildProtocolCodec.encode(request)
+    )
+    var auxiliaryChannel: UInt64?
+
+    XCTAssertFalse(
+      try probe.intercept(
+        direction: .clientToService,
+        frame: original,
+        send: { frame in
+          auxiliaryChannel = frame.channel
+          try respond(to: frame, with: makeExportedEnvironment(), probe: probe)
+        }
+      )
+    )
+
+    XCTAssertEqual(auxiliaryChannel, UInt64.max - 3)
+    XCTAssertNotEqual(auxiliaryChannel, observedChannel)
+    XCTAssertNotEqual(auxiliaryChannel, responseChannel)
+    XCTAssertNotEqual(auxiliaryChannel, requestChannel)
+    XCTAssertEqual(try fixture.readReport().status, .succeeded)
   }
 
   func testInvalidManifestWritesFailedPrivateReportAndLeavesProbeDisabled() throws {

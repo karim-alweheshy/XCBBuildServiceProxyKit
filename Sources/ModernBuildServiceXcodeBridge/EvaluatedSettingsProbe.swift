@@ -34,6 +34,11 @@ private struct ActiveQuery {
 }
 
 public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
+  // Xcode allocates positive channels monotonically from one. Keep auxiliary
+  // traffic in the high half of UInt64 and walk downward, skipping every
+  // channel already observed on either side of the relay.
+  private static let auxiliaryChannelLowerBound = UInt64(1) << 63
+
   public static let fixedPlanRoleKeys = [
     "BAZEL_LABEL",
     "BAZEL_TARGET_ID",
@@ -68,6 +73,8 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
   private var hasAttemptedCreateBuild = false
   private var activeQuery: ActiveQuery?
   private var drainingResponseChannels: Set<UInt64> = []
+  private var observedChannels: Set<UInt64> = []
+  private var nextAuxiliaryChannel: UInt64? = .max
   private var hasWrittenReport = false
 
   public init(
@@ -108,6 +115,7 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
   ) -> Bool {
     condition.lock()
     defer { condition.unlock() }
+    observedChannels.insert(channel)
     switch direction {
     case .clientToService:
       return isEnabled && !hasAttemptedCreateBuild && messageName == CreateBuildRequest.name
@@ -196,6 +204,8 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
       return
     }
 
+    reserveChannels([frame.channel, request.responseChannel])
+
     let configuredTargets = request.request.configuredTargets
     guard !configuredTargets.isEmpty else {
       writeReport(
@@ -212,6 +222,10 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
     var failures: [EvaluatedSettingsProbeFailureCode] = []
 
     for (targetIndex, configuredTarget) in configuredTargets.enumerated() {
+      guard let auxiliaryChannel = allocateAuxiliaryChannel() else {
+        appendUnique(.auxiliaryChannelUnavailable, to: &failures)
+        break
+      }
       let parameters = configuredTarget.parameters ?? request.request.parameters
       let requestPayload = SwiftBuildProtocolCodec.encodeAllExportedMacrosAndValuesRequest(
         sessionHandle: request.sessionHandle,
@@ -220,7 +234,7 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
       )
       switch performQuery(
         payload: requestPayload,
-        channel: frame.channel,
+        channel: auxiliaryChannel,
         send: send
       ) {
       case .values(let values):
@@ -354,6 +368,25 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
     condition.lock()
     activeQuery = nil
     condition.unlock()
+  }
+
+  private func reserveChannels(_ channels: [UInt64]) {
+    condition.lock()
+    observedChannels.formUnion(channels)
+    condition.unlock()
+  }
+
+  private func allocateAuxiliaryChannel() -> UInt64? {
+    condition.lock()
+    defer { condition.unlock() }
+    while let candidate = nextAuxiliaryChannel {
+      nextAuxiliaryChannel =
+        candidate == Self.auxiliaryChannelLowerBound ? nil : candidate - 1
+      guard !observedChannels.contains(candidate) else { continue }
+      observedChannels.insert(candidate)
+      return candidate
+    }
+    return nil
   }
 
   private func sharedValuesDisagree(_ valuesByTarget: [[String]]) -> Bool {

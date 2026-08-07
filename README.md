@@ -43,12 +43,14 @@ native service to evaluate the fixed build-plan roles plus the manifest's
 `environmentKeys`, then forwards the original request bytes unchanged whether
 the probe succeeds or fails. The report contains setting names, non-empty
 presence, UTF-8 byte lengths, and SHA-256 digests, never setting values.
-The bridge makes one target-scoped exported-settings request per target. The
-service constructs that response with its shell-script task-environment
-semantics. The bridge immediately projects it onto the fixed/manifest
-allowlist; unknown exported settings never enter the report. Every fixed plan
-role must be non-empty, while an unexported manifest environment key is
-represented as absent/empty.
+The bridge makes one target-scoped exported-settings request per target on a
+distinct proxy-owned channel in the high half of the `UInt64` channel space.
+It skips every observed channel and never reuses the original `CREATE_BUILD`
+request or response channel. The service constructs the response with its
+shell-script task-environment semantics. The bridge immediately projects it
+onto the fixed/manifest allowlist; unknown exported settings never enter the
+report. Every fixed plan role must be non-empty, while an unexported manifest
+environment key is represented as absent/empty.
 
 The Xcode bridge alone uses the unmodified public `SWBProtocol` and `SWBUtil`
 products from Swift Build commit

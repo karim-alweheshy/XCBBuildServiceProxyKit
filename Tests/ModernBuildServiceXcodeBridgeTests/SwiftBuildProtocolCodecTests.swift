@@ -153,11 +153,12 @@ private func sha256(_ data: Data) -> String {
 func makeCreateBuildRequest(
   targets: [ConfiguredTargetMessagePayload],
   buildCommand: BuildCommandMessagePayload = .build(style: .buildOnly, skipDependencies: false),
-  parameters: BuildParametersMessagePayload = makeBuildParameters()
+  parameters: BuildParametersMessagePayload = makeBuildParameters(),
+  responseChannel: UInt64 = 91
 ) -> CreateBuildRequest {
   CreateBuildRequest(
     sessionHandle: "SESSION-1",
-    responseChannel: 91,
+    responseChannel: responseChannel,
     request: BuildRequestMessagePayload(
       parameters: parameters,
       configuredTargets: targets,
