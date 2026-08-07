@@ -104,6 +104,10 @@ struct SwiftBuildPresentedDiagnostic: Equatable, Sendable {
 /// Inputs deliberately contain no transport, Bazel, or Swift Build service-internal types. The
 /// caller supplies already validated presentation facts and chooses the outer protocol channel.
 enum SwiftBuildOperationPresenter {
+  static func encodeError(_ message: String) -> [UInt8] {
+    SwiftBuildProtocolCodec.encode(ErrorResponse(message))
+  }
+
   static func encodeBuildCreated(id: Int) -> [UInt8] {
     SwiftBuildProtocolCodec.encode(BuildCreated(id: id))
   }

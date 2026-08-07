@@ -449,7 +449,7 @@ final class ResolvedBuildPlanBuilderTests: XCTestCase {
   }
 }
 
-private final class PlanBuilderFixture {
+final class PlanBuilderFixture {
   let bazelOutputURL: URL
   let environmentKeys = [
     "ACTION",

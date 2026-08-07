@@ -5,6 +5,71 @@ import XCTest
 @testable import ModernBuildServiceProxyCore
 
 final class SerializedFrameSinkTests: XCTestCase {
+  func testOutputGateWaitsForInflightSendThenRejectsRetainedCapability() throws {
+    let sendEntered = DispatchSemaphore(value: 0)
+    let releaseSend = DispatchSemaphore(value: 0)
+    let sendFinished = DispatchSemaphore(value: 0)
+    let closeFinished = DispatchSemaphore(value: 0)
+    let outputs = BuildServiceFrameOutputs(
+      sendToNative: { _ in
+        sendEntered.signal()
+        releaseSend.wait()
+      },
+      sendToXcode: { _ in }
+    )
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      defer { sendFinished.signal() }
+      try? outputs.sendToNative(BuildServiceRawFrame(channel: 1, payload: [1]))
+    }
+    XCTAssertEqual(sendEntered.wait(timeout: .now() + 2), .success)
+    DispatchQueue.global(qos: .userInitiated).async {
+      outputs.closeAndWait()
+      closeFinished.signal()
+    }
+    XCTAssertEqual(closeFinished.wait(timeout: .now() + 0.02), .timedOut)
+    releaseSend.signal()
+    XCTAssertEqual(sendFinished.wait(timeout: .now() + 2), .success)
+    XCTAssertEqual(closeFinished.wait(timeout: .now() + 2), .success)
+
+    for send in [outputs.sendToNative, outputs.sendToXcode] {
+      XCTAssertThrowsError(try send(BuildServiceRawFrame(channel: 2, payload: [2]))) {
+        XCTAssertEqual($0 as? BuildServiceFrameOutputsError, .relayClosed)
+      }
+    }
+  }
+
+  func testOutputGateHasBoundedCloseAndIndependentDirections() throws {
+    let nativeSendEntered = DispatchSemaphore(value: 0)
+    let releaseNativeSend = DispatchSemaphore(value: 0)
+    let nativeSendFinished = DispatchSemaphore(value: 0)
+    let outputs = BuildServiceFrameOutputs(
+      sendToNative: { _ in
+        nativeSendEntered.signal()
+        releaseNativeSend.wait()
+      },
+      sendToXcode: { _ in }
+    )
+    DispatchQueue.global(qos: .userInitiated).async {
+      defer { nativeSendFinished.signal() }
+      try? outputs.sendToNative(BuildServiceRawFrame(channel: 1, payload: [1]))
+    }
+    XCTAssertEqual(nativeSendEntered.wait(timeout: .now() + 2), .success)
+
+    XCTAssertFalse(outputs.closeNativeAndWait(timeout: 0.02))
+    XCTAssertNoThrow(
+      try outputs.sendToXcode(BuildServiceRawFrame(channel: 2, payload: [2]))
+    )
+    XCTAssertThrowsError(
+      try outputs.sendToNative(BuildServiceRawFrame(channel: 3, payload: [3]))
+    ) {
+      XCTAssertEqual($0 as? BuildServiceFrameOutputsError, .relayClosed)
+    }
+    releaseNativeSend.signal()
+    XCTAssertEqual(nativeSendFinished.wait(timeout: .now() + 2), .success)
+    XCTAssertTrue(outputs.closeAndWait(timeout: 0.2))
+  }
+
   func testOversizeUncapturedFrameStreamsWithBoundedChunksAndExactDigest() throws {
     let payloadLength = BuildServiceFramePump.maximumInterceptedPayloadLength + 1
     let channel: UInt64 = 0x1020_3040

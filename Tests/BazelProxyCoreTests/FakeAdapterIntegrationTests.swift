@@ -228,6 +228,100 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
   }
 
+  func testExecutorCancellationBeforeProductCommitReturnsCancelledWithoutPublishing() async throws {
+    let fixture = try ManifestFixture()
+    let source = fixture.workspaceURL.appendingPathComponent(
+      "bazel-out/products/App.app",
+      isDirectory: true
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "DerivedProducts/App.app",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    try Data("old".utf8).write(to: destination.appendingPathComponent("artifact"))
+    let plan = try planWithProduct(fixture: fixture, source: source, destination: destination)
+    try setAdapterScript(successScript(), fixture: fixture)
+    let barrierReached = DispatchSemaphore(value: 0)
+    let releaseBarrier = DispatchSemaphore(value: 0)
+    let materializer = ProductMaterializer { point in
+      if point == .beforeMaterializationCommitBarrier {
+        barrierReached.signal()
+        releaseBarrier.wait()
+      }
+      return nil
+    }
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      ),
+      materializer: materializer
+    )
+    let task = Task {
+      await executor.execute(
+        plan: plan,
+        processEnvironment: ["HOME": "/safe/home", "PATH": "/usr/bin:/bin"]
+      )
+    }
+
+    XCTAssertEqual(barrierReached.wait(timeout: .now() + 2), .success)
+    task.cancel()
+    releaseBarrier.signal()
+    let result = await task.value
+    XCTAssertEqual(result.status, .cancelled)
+    XCTAssertNil(result.productReceipt)
+    XCTAssertEqual(
+      try String(contentsOf: destination.appendingPathComponent("artifact"), encoding: .utf8),
+      "old"
+    )
+  }
+
+  func testExecutorCancellationAfterProductCommitBarrierReturnsPublishedSuccess() async throws {
+    let fixture = try ManifestFixture()
+    let source = fixture.workspaceURL.appendingPathComponent(
+      "bazel-out/products/App.app",
+      isDirectory: true
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let plan = try planWithProduct(fixture: fixture, source: source, destination: destination)
+    try setAdapterScript(successScript(), fixture: fixture)
+    let commitAccepted = DispatchSemaphore(value: 0)
+    let releaseCommit = DispatchSemaphore(value: 0)
+    let materializer = ProductMaterializer { point in
+      if case .beforeMaterializationCommit(index: 0, destination: _) = point {
+        commitAccepted.signal()
+        releaseCommit.wait()
+      }
+      return nil
+    }
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      ),
+      materializer: materializer
+    )
+    let task = Task {
+      await executor.execute(
+        plan: plan,
+        processEnvironment: ["HOME": "/safe/home", "PATH": "/usr/bin:/bin"]
+      )
+    }
+
+    XCTAssertEqual(commitAccepted.wait(timeout: .now() + 2), .success)
+    task.cancel()
+    releaseCommit.signal()
+    let result = await task.value
+    XCTAssertEqual(result.status, .succeeded)
+    XCTAssertNotNil(result.productReceipt)
+    XCTAssertEqual(
+      try String(contentsOf: destination.appendingPathComponent("artifact"), encoding: .utf8),
+      "fake-product"
+    )
+  }
+
   func testFakeAdapterSuccessProducesValidatedBEPReceiptAndProduct() async throws {
     let fixture = try ManifestFixture()
     let source = fixture.workspaceURL.appendingPathComponent(

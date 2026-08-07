@@ -58,7 +58,52 @@ public enum ProductMaterializationError: LocalizedError, Equatable, Sendable {
 
 enum ProductMutationPoint: Equatable, Sendable {
   case beforeCleanMove(index: Int, destination: URL)
+  case beforeCleanCommitBarrier
+  case beforeMaterializationCommitBarrier
   case beforeMaterializationCommit(index: Int, destination: URL)
+}
+
+enum ProductMutationCancellationError: Error, Equatable {
+  case cancelledBeforeCommit
+}
+
+/// Linearizes cancellation against the first externally visible product mutation.
+final class ProductMutationCancellationGate: @unchecked Sendable {
+  private enum State: Equatable {
+    case cancelled
+    case committed
+    case open
+  }
+
+  private let lock = NSLock()
+  private var state = State.open
+
+  func requestCancellation() {
+    lock.withLock {
+      if state == .open { state = .cancelled }
+    }
+  }
+
+  func checkBeforeCommit() throws {
+    try lock.withLock {
+      if state == .cancelled {
+        throw ProductMutationCancellationError.cancelledBeforeCommit
+      }
+    }
+  }
+
+  func beginCommit() throws {
+    try lock.withLock {
+      switch state {
+      case .cancelled:
+        throw ProductMutationCancellationError.cancelledBeforeCommit
+      case .open:
+        state = .committed
+      case .committed:
+        break
+      }
+    }
+  }
 }
 
 public final class ProductMaterializer: @unchecked Sendable {
@@ -93,8 +138,20 @@ public final class ProductMaterializer: @unchecked Sendable {
     plan: ResolvedBuildPlan,
     fileManager: FileManager = .default
   ) throws -> ProductReceipt {
+    try materialize(plan: plan, fileManager: fileManager, cancellationGate: nil)
+  }
+
+  func materialize(
+    plan: ResolvedBuildPlan,
+    fileManager: FileManager = .default,
+    cancellationGate: ProductMutationCancellationGate?
+  ) throws -> ProductReceipt {
     try Self.mutationLock.withLock {
-      try materializeUnlocked(plan: plan, fileManager: fileManager)
+      try materializeUnlocked(
+        plan: plan,
+        fileManager: fileManager,
+        cancellationGate: cancellationGate
+      )
     }
   }
 
@@ -102,20 +159,34 @@ public final class ProductMaterializer: @unchecked Sendable {
     plan: ResolvedBuildPlan,
     fileManager: FileManager = .default
   ) throws -> CleanReceipt {
+    try clean(plan: plan, fileManager: fileManager, cancellationGate: nil)
+  }
+
+  func clean(
+    plan: ResolvedBuildPlan,
+    fileManager: FileManager = .default,
+    cancellationGate: ProductMutationCancellationGate?
+  ) throws -> CleanReceipt {
     try Self.mutationLock.withLock {
-      try cleanUnlocked(plan: plan, fileManager: fileManager)
+      try cleanUnlocked(
+        plan: plan,
+        fileManager: fileManager,
+        cancellationGate: cancellationGate
+      )
     }
   }
 
   private func materializeUnlocked(
     plan: ResolvedBuildPlan,
-    fileManager: FileManager
+    fileManager: FileManager,
+    cancellationGate: ProductMutationCancellationGate?
   ) throws -> ProductReceipt {
     var entries = [MaterializationEntry]()
     defer { removeTransactionArtifacts(entries: entries, fileManager: fileManager) }
 
     var destinations = Set<String>()
     for target in plan.targets {
+      try cancellationGate?.checkBeforeCommit()
       guard target.mapping.product.materialization != .none else { continue }
       guard let paths = target.productPaths else {
         throw ProductMaterializationError.missingSource(target.mapping.targetID)
@@ -152,6 +223,7 @@ public final class ProductMaterializer: @unchecked Sendable {
       }
       do {
         try fileManager.copyItem(at: source, to: staged)
+        try cancellationGate?.checkBeforeCommit()
         try Self.validateProductType(
           staged,
           materialization: target.mapping.product.materialization,
@@ -177,6 +249,10 @@ public final class ProductMaterializer: @unchecked Sendable {
     }
 
     do {
+      if let injected = failureInjector?(.beforeMaterializationCommitBarrier) {
+        throw injected
+      }
+      try cancellationGate?.beginCommit()
       for index in entries.indices {
         if let injected = failureInjector?(
           .beforeMaterializationCommit(
@@ -198,6 +274,16 @@ public final class ProductMaterializer: @unchecked Sendable {
         try fileManager.moveItem(at: entries[index].stagedURL, to: destination)
         entries[index].committed = true
       }
+    } catch let cancellation as ProductMutationCancellationError {
+      do {
+        try rollbackMaterialization(entries: entries, fileManager: fileManager)
+      } catch let rollbackError {
+        throw ProductMaterializationError.rollbackFailed(
+          original: cancellation.localizedDescription,
+          rollback: rollbackError.localizedDescription
+        )
+      }
+      throw cancellation
     } catch {
       do {
         try rollbackMaterialization(entries: entries, fileManager: fileManager)
@@ -226,7 +312,8 @@ public final class ProductMaterializer: @unchecked Sendable {
 
   private func cleanUnlocked(
     plan: ResolvedBuildPlan,
-    fileManager: FileManager
+    fileManager: FileManager,
+    cancellationGate: ProductMutationCancellationGate?
   ) throws -> CleanReceipt {
     var destinations = Set<String>()
     var absent = [URL]()
@@ -251,6 +338,11 @@ public final class ProductMaterializer: @unchecked Sendable {
     }
 
     do {
+      try cancellationGate?.checkBeforeCommit()
+      if let injected = failureInjector?(.beforeCleanCommitBarrier) {
+        throw injected
+      }
+      try cancellationGate?.beginCommit()
       for destination in validatedDestinations {
         guard fileManager.fileExists(atPath: destination.path) else {
           absent.append(destination)
@@ -268,6 +360,18 @@ public final class ProductMaterializer: @unchecked Sendable {
         try fileManager.moveItem(at: destination, to: trash)
         moved.append(CleanEntry(destinationURL: destination, trashURL: trash))
       }
+    } catch let cancellation as ProductMutationCancellationError {
+      do {
+        for entry in moved.reversed() {
+          try fileManager.moveItem(at: entry.trashURL, to: entry.destinationURL)
+        }
+      } catch let rollbackError {
+        throw ProductMaterializationError.rollbackFailed(
+          original: cancellation.localizedDescription,
+          rollback: rollbackError.localizedDescription
+        )
+      }
+      throw cancellation
     } catch {
       do {
         for entry in moved.reversed() {

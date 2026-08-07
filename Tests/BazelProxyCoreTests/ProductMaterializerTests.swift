@@ -156,6 +156,115 @@ final class ProductMaterializerTests: XCTestCase {
     XCTAssertEqual(try productContents(destinationLibrary), "existing-library")
   }
 
+  func testCancellationBeforeMaterializationCommitLeavesExistingProductUntouched() async throws {
+    let fixture = try ManifestFixture()
+    let source = try createProduct(
+      at: fixture.workspaceURL.appendingPathComponent("bazel-out/products/App.app"),
+      contents: "new"
+    )
+    let destination = try createProduct(
+      at: fixture.rootURL.appendingPathComponent("products/App.app"),
+      contents: "old"
+    )
+    let plan = try makePlan(fixture: fixture, products: [(source, destination)])
+    let barrierReached = DispatchSemaphore(value: 0)
+    let releaseBarrier = DispatchSemaphore(value: 0)
+    let materializer = ProductMaterializer { point in
+      if point == .beforeMaterializationCommitBarrier {
+        barrierReached.signal()
+        releaseBarrier.wait()
+      }
+      return nil
+    }
+    let gate = ProductMutationCancellationGate()
+
+    let task = Task.detached {
+      try materializer.materialize(plan: plan, cancellationGate: gate)
+    }
+    XCTAssertEqual(barrierReached.wait(timeout: .now() + 2), .success)
+    gate.requestCancellation()
+    releaseBarrier.signal()
+    do {
+      _ = try await task.value
+      XCTFail("Expected cancellation before commit")
+    } catch {
+      XCTAssertEqual(error as? ProductMutationCancellationError, .cancelledBeforeCommit)
+    }
+    XCTAssertEqual(try productContents(destination), "old")
+    XCTAssertEqual(try transactionArtifacts(in: destination.deletingLastPathComponent()), [])
+  }
+
+  func testCancellationAfterMaterializationCommitBarrierCannotReportCancelledProduct() async throws
+  {
+    let fixture = try ManifestFixture()
+    let source = try createProduct(
+      at: fixture.workspaceURL.appendingPathComponent("bazel-out/products/App.app"),
+      contents: "new"
+    )
+    let destination = try createProduct(
+      at: fixture.rootURL.appendingPathComponent("products/App.app"),
+      contents: "old"
+    )
+    let plan = try makePlan(fixture: fixture, products: [(source, destination)])
+    let commitAccepted = DispatchSemaphore(value: 0)
+    let releaseCommit = DispatchSemaphore(value: 0)
+    let materializer = ProductMaterializer { point in
+      if case .beforeMaterializationCommit(index: 0, destination: _) = point {
+        commitAccepted.signal()
+        releaseCommit.wait()
+      }
+      return nil
+    }
+    let gate = ProductMutationCancellationGate()
+
+    let task = Task.detached {
+      try materializer.materialize(plan: plan, cancellationGate: gate)
+    }
+    XCTAssertEqual(commitAccepted.wait(timeout: .now() + 2), .success)
+    gate.requestCancellation()
+    releaseCommit.signal()
+    let receipt = try await task.value
+    XCTAssertEqual(receipt.products.map(\.targetID), ["app-app"])
+    XCTAssertEqual(try productContents(destination), "new")
+  }
+
+  func testCancellationBeforeCleanCommitLeavesProductUntouched() async throws {
+    let fixture = try ManifestFixture()
+    let source = try createProduct(
+      at: fixture.workspaceURL.appendingPathComponent("bazel-out/products/App.app"),
+      contents: "source"
+    )
+    let destination = try createProduct(
+      at: fixture.rootURL.appendingPathComponent("products/App.app"),
+      contents: "existing"
+    )
+    let plan = try makePlan(fixture: fixture, products: [(source, destination)])
+    let barrierReached = DispatchSemaphore(value: 0)
+    let releaseBarrier = DispatchSemaphore(value: 0)
+    let materializer = ProductMaterializer { point in
+      if point == .beforeCleanCommitBarrier {
+        barrierReached.signal()
+        releaseBarrier.wait()
+      }
+      return nil
+    }
+    let gate = ProductMutationCancellationGate()
+
+    let task = Task.detached {
+      try materializer.clean(plan: plan, cancellationGate: gate)
+    }
+    XCTAssertEqual(barrierReached.wait(timeout: .now() + 2), .success)
+    gate.requestCancellation()
+    releaseBarrier.signal()
+    do {
+      _ = try await task.value
+      XCTFail("Expected cancellation before clean commit")
+    } catch {
+      XCTAssertEqual(error as? ProductMutationCancellationError, .cancelledBeforeCommit)
+    }
+    XCTAssertEqual(try productContents(destination), "existing")
+  }
+
   func testRejectsEscapingSourceSymlinkAndDestinationSymlink() throws {
     let fixture = try ManifestFixture()
     let source = try createProduct(
