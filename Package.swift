@@ -6,10 +6,14 @@ let package = Package(
   name: "XCBBuildServiceProxyKit",
   platforms: [.macOS(.v15)],
   products: [
+    .library(
+      name: "BazelProxyCore",
+      targets: ["BazelProxyCore"]
+    ),
     .executable(
       name: "ModernBuildServiceProxy",
       targets: ["ModernBuildServiceProxy"]
-    )
+    ),
   ],
   dependencies: [
     .package(
@@ -18,6 +22,10 @@ let package = Package(
     )
   ],
   targets: [
+    .target(
+      name: "BazelProxyCore",
+      path: "Sources/BazelProxyCore"
+    ),
     .target(
       name: "ModernBuildServiceProxyCore",
       path: "Sources/ModernBuildServiceProxyCore"
@@ -49,6 +57,11 @@ let package = Package(
         .product(name: "SWBUtil", package: "swift-build"),
       ],
       path: "Tests/ModernBuildServiceXcodeBridgeTests"
+    ),
+    .testTarget(
+      name: "BazelProxyCoreTests",
+      dependencies: ["BazelProxyCore"],
+      path: "Tests/BazelProxyCoreTests"
     ),
   ],
   swiftLanguageModes: [.v5]
