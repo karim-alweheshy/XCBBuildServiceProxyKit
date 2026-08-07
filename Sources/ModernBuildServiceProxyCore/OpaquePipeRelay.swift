@@ -15,11 +15,11 @@ public enum OpaquePipeRelayError: LocalizedError {
   }
 }
 
-/// Relays the build-service byte stream without decoding or rewriting it.
+/// Relays complete build-service frames without decoding or rewriting payloads.
 ///
-/// Message boundaries remain encoded in the stream and are interpreted only by
-/// Xcode and its selected native service. This keeps unknown protocol messages
-/// and fields transparent.
+/// The fixed outer header is validated to bound reads, while every accepted
+/// header and payload byte is forwarded unchanged. Unknown protocol messages,
+/// fields, and noncanonical payload encodings therefore remain transparent.
 public final class OpaquePipeRelay {
   public struct Summary: Equatable {
     public let clientToServiceBytes: UInt64
@@ -43,6 +43,7 @@ public final class OpaquePipeRelay {
   private let output: FileHandle
   private let errorOutput: FileHandle
   private let terminationGrace: TimeInterval
+  private let metadataRecorder: BuildServiceFrameMetadataRecorder?
   private let lock = NSLock()
   private var process: Process?
   private var stopRequested = false
@@ -53,7 +54,8 @@ public final class OpaquePipeRelay {
     input: FileHandle = .standardInput,
     output: FileHandle = .standardOutput,
     errorOutput: FileHandle = .standardError,
-    terminationGrace: TimeInterval = 2
+    terminationGrace: TimeInterval = 2,
+    metadataRecorder: BuildServiceFrameMetadataRecorder? = nil
   ) {
     self.executableURL = executableURL
     self.environment = environment
@@ -61,6 +63,7 @@ public final class OpaquePipeRelay {
     self.output = output
     self.errorOutput = errorOutput
     self.terminationGrace = terminationGrace
+    self.metadataRecorder = metadataRecorder
   }
 
   public func run(onProcessStarted: (() -> Void)? = nil) throws -> Summary {
@@ -111,8 +114,14 @@ public final class OpaquePipeRelay {
         copyGroup.leave()
       }
       do {
-        let byteCount = try Self.copyBytes(from: self.input, to: childInput.fileHandleForWriting)
-        countLock.withLock { clientToServiceBytes = byteCount }
+        let summary = try BuildServiceFramePump(
+          direction: .clientToService,
+          reader: FileDescriptorFrameReader(descriptor: self.input.fileDescriptor),
+          writer: FileDescriptorFrameWriter(
+            descriptor: childInput.fileHandleForWriting.fileDescriptor),
+          recorder: self.metadataRecorder
+        ).run()
+        countLock.withLock { clientToServiceBytes = summary.byteCount }
       } catch {
         countLock.withLock {
           if firstRelayError == nil && !self.isStopRequested {
@@ -130,8 +139,14 @@ public final class OpaquePipeRelay {
     DispatchQueue.global(qos: .userInitiated).async {
       defer { copyGroup.leave() }
       do {
-        let byteCount = try Self.copyBytes(from: childOutput.fileHandleForReading, to: self.output)
-        countLock.withLock { serviceToClientBytes = byteCount }
+        let summary = try BuildServiceFramePump(
+          direction: .serviceToClient,
+          reader: FileDescriptorFrameReader(
+            descriptor: childOutput.fileHandleForReading.fileDescriptor),
+          writer: FileDescriptorFrameWriter(descriptor: self.output.fileDescriptor),
+          recorder: self.metadataRecorder
+        ).run()
+        countLock.withLock { serviceToClientBytes = summary.byteCount }
       } catch {
         countLock.withLock {
           if firstRelayError == nil && !self.isStopRequested {
@@ -194,44 +209,6 @@ public final class OpaquePipeRelay {
 
   private var isStopRequested: Bool {
     lock.withLock { stopRequested }
-  }
-
-  private static func copyBytes(from source: FileHandle, to destination: FileHandle) throws
-    -> UInt64
-  {
-    var total: UInt64 = 0
-    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-    let sourceDescriptor = source.fileDescriptor
-    let destinationDescriptor = destination.fileDescriptor
-    _ = fcntl(destinationDescriptor, F_SETNOSIGPIPE, 1)
-
-    while true {
-      let bytesRead = Darwin.read(sourceDescriptor, &buffer, buffer.count)
-      if bytesRead == 0 {
-        return total
-      }
-      if bytesRead < 0 {
-        if errno == EINTR { continue }
-        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-      }
-
-      var written = 0
-      while written < bytesRead {
-        let bytesWritten = buffer.withUnsafeBytes { rawBuffer in
-          Darwin.write(
-            destinationDescriptor,
-            rawBuffer.baseAddress!.advanced(by: written),
-            bytesRead - written
-          )
-        }
-        if bytesWritten < 0 {
-          if errno == EINTR { continue }
-          throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        written += bytesWritten
-      }
-      total += UInt64(bytesRead)
-    }
   }
 }
 

@@ -61,6 +61,7 @@ final class NativeBuildServiceResolverTests: XCTestCase {
         "SWBBUILDSERVICE_BUNDLE_PATH": "proxy",
         "XCBPROXY_XCODE_PATH": "/Xcode.app",
         "XCBPROXY_LOG_SUMMARY": "1",
+        "XCBPROXY_METADATA_PATH": "/private/frames.jsonl",
         "SAFE_KEY": "preserved",
         "AUTH_TOKEN": "must-not-be-inherited",
       ],
@@ -73,6 +74,7 @@ final class NativeBuildServiceResolverTests: XCTestCase {
     XCTAssertNil(result["SWBBUILDSERVICE_BUNDLE_PATH"])
     XCTAssertNil(result["XCBPROXY_XCODE_PATH"])
     XCTAssertNil(result["XCBPROXY_LOG_SUMMARY"])
+    XCTAssertNil(result["XCBPROXY_METADATA_PATH"])
     XCTAssertNil(result["SAFE_KEY"])
     XCTAssertNil(result["AUTH_TOKEN"])
     XCTAssertEqual(result["DEVELOPER_DIR"], developerURL.path)

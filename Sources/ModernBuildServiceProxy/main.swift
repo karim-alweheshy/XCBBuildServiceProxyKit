@@ -19,9 +19,13 @@ do {
   let childEnvironment = NativeBuildServiceResolver.sanitizedChildEnvironment(
     developerURL: resolution.developerURL
   )
+  let metadataRecorder = try ProcessInfo.processInfo.environment["XCBPROXY_METADATA_PATH"]
+    .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: false) }
+    .map(BuildServiceFrameMetadataRecorder.init(fileURL:))
   let relay = OpaquePipeRelay(
     executableURL: resolution.serviceExecutableURL,
-    environment: childEnvironment
+    environment: childEnvironment,
+    metadataRecorder: metadataRecorder
   )
 
   let signalQueue = DispatchQueue(label: "ModernBuildServiceProxy.signals")

@@ -27,6 +27,13 @@ Use the resulting executable as `XCBBUILDSERVICE_PATH` for a single
 to Xcode 26.5. An unsupported Xcode build exits before launching any service.
 Unset `XCBBUILDSERVICE_PATH` to return immediately to the native service.
 
+Set `XCBPROXY_METADATA_PATH` to a new path in an existing private directory to
+record one metadata-only JSON line per completed frame. The proxy creates the
+file exclusively with mode 0600 and refuses to overwrite an existing path.
+Records contain only direction, sequence, channel, payload length, the leading
+MessagePack message-name string when safely recognizable, and payload SHA-256.
+Payload bytes and environment values are never recorded.
+
 This target intentionally contains no Bazel interception, protocol model, or
 project-selection behavior. It is the reversible pass-through feasibility gate
 for a future modern proxy.

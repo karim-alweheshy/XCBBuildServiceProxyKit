@@ -6,9 +6,7 @@ import XCTest
 
 final class OpaquePipeRelayTests: XCTestCase {
   func testRelaysOpaqueBytesExactlyInBothDirections() throws {
-    let script = try TemporaryExecutable(
-      contents: "#!/bin/sh\nwhile IFS= read -r line; do printf 'service:%s\\n' \"$line\"; done\n"
-    )
+    let script = try TemporaryExecutable(contents: "#!/bin/sh\nexec /bin/cat\n")
     defer { script.remove() }
 
     let clientInput = Pipe()
@@ -28,7 +26,10 @@ final class OpaquePipeRelayTests: XCTestCase {
       relayFinished.fulfill()
     }
 
-    let input = Data("one\ntwo\n".utf8)
+    let input = Data(
+      makeTestFrame(channel: 99, payload: [0xD9, 0x01, 0x58, 0xCC, 0x2A])
+        + makeTestFrame(channel: 0, payload: Array("EXIT".utf8))
+    )
     try clientInput.fileHandleForWriting.write(contentsOf: input)
     try clientInput.fileHandleForWriting.close()
     wait(for: [relayFinished], timeout: 5)
@@ -36,7 +37,7 @@ final class OpaquePipeRelayTests: XCTestCase {
     let output = clientOutput.fileHandleForReading.readDataToEndOfFile()
 
     let summary = try XCTUnwrap(result).get()
-    XCTAssertEqual(output, Data("service:one\nservice:two\n".utf8))
+    XCTAssertEqual(output, input)
     XCTAssertEqual(summary.clientToServiceBytes, UInt64(input.count))
     XCTAssertEqual(summary.serviceToClientBytes, UInt64(output.count))
     XCTAssertEqual(summary.terminationStatus, 0)
@@ -75,10 +76,13 @@ final class OpaquePipeRelayTests: XCTestCase {
   }
 
   func testDestinationWriteFailureIsNotReportedAsCleanEOF() throws {
-    let script = try TemporaryExecutable(contents: "#!/bin/sh\nprintf 'response'\n/bin/sleep 30\n")
+    let script = try TemporaryExecutable(contents: "#!/bin/sh\nexec /bin/cat\n")
     defer { script.remove() }
 
     let clientInput = Pipe()
+    try clientInput.fileHandleForWriting.write(
+      contentsOf: Data(makeTestFrame(channel: 1, payload: [0xA1, 0x58]))
+    )
     try clientInput.fileHandleForWriting.close()
     let readOnlyOutput = try XCTUnwrap(FileHandle(forReadingAtPath: "/dev/null"))
     let relay = OpaquePipeRelay(
@@ -128,6 +132,13 @@ final class OpaquePipeRelayTests: XCTestCase {
     XCTAssertNotEqual(summary.terminationStatus, 0)
     XCTAssertTrue(output.isEmpty)
   }
+}
+
+private func makeTestFrame(channel: UInt64, payload: [UInt8]) -> [UInt8] {
+  (0..<8).map { UInt8(truncatingIfNeeded: channel >> UInt64($0 * 8)) }
+    + (0..<4).map {
+      UInt8(truncatingIfNeeded: UInt32(payload.count) >> UInt32($0 * 8))
+    } + payload
 }
 
 private final class TemporaryExecutable {
