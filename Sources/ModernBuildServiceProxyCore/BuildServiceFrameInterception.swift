@@ -30,7 +30,31 @@ public enum BuildServiceFrameInterceptionFailure: Equatable, Sendable {
   case capturedPayloadTooLarge(actualBytes: UInt32, maximumBytes: UInt32)
 }
 
-/// A narrow hook for opt-in Xcode protocol probes.
+/// Thread-safe routing capabilities backed by the relay's two serialized
+/// output sinks. A router can explicitly send either toward the native service
+/// or toward Xcode, including from asynchronous work retained after interception.
+public final class BuildServiceFrameOutputs: @unchecked Sendable {
+  private let nativeSender: (BuildServiceRawFrame) throws -> Void
+  private let xcodeSender: (BuildServiceRawFrame) throws -> Void
+
+  public init(
+    sendToNative: @escaping (BuildServiceRawFrame) throws -> Void,
+    sendToXcode: @escaping (BuildServiceRawFrame) throws -> Void
+  ) {
+    nativeSender = sendToNative
+    xcodeSender = sendToXcode
+  }
+
+  public func sendToNative(_ frame: BuildServiceRawFrame) throws {
+    try nativeSender(frame)
+  }
+
+  public func sendToXcode(_ frame: BuildServiceRawFrame) throws {
+    try xcodeSender(frame)
+  }
+}
+
+/// A narrow hook for opt-in Xcode protocol routing and inspection.
 ///
 /// The core owns framing and raw forwarding. Implementations may inspect only
 /// explicitly selected complete frames and must return `false` when the
@@ -46,7 +70,7 @@ public protocol BuildServiceFrameInterceptor: AnyObject {
   func intercept(
     direction: BuildServiceFrameDirection,
     frame: BuildServiceRawFrame,
-    send: (BuildServiceRawFrame) throws -> Void
+    outputs: BuildServiceFrameOutputs
   ) throws -> Bool
 
   func interceptionDidFail(

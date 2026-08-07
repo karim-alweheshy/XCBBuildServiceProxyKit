@@ -16,6 +16,13 @@ selected Xcode, validates the exact Xcode build before launch, removes build
 service override variables from the child's environment, and relays stdin and
 stdout without decoding or rewriting messages.
 
+Each output descriptor has exactly one serialized frame sink shared by its
+forwarding pump and by router injections in either direction. A sink owns the
+whole header-plus-payload transaction, including bounded streaming and partial
+write retries, so concurrent output cannot interleave frame bytes. The first
+sink failure is latched, rejects later sends, and stops the relay and its owned
+native process group.
+
 Build it with:
 
 ```sh
@@ -33,6 +40,9 @@ file exclusively with mode 0600 and refuses to overwrite an existing path.
 Records contain only direction, sequence, channel, payload length, the leading
 MessagePack message-name string when safely recognizable, and payload SHA-256.
 Payload bytes and environment values are never recorded.
+This schema still describes ingress frames only. Output disposition and
+injected-frame metadata are intentionally deferred to the owned-operation
+evidence slice.
 
 An evaluated-settings probe is available only when both
 `XCBPROXY_SETTINGS_PROBE_MANIFEST_PATH` and

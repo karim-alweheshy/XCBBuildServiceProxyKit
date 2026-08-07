@@ -13,6 +13,7 @@ public enum BuildServiceFrameRelayError: LocalizedError, Equatable {
   case truncatedPayload(expectedBytes: UInt32, actualBytes: UInt32)
   case invalidReadCount(Int)
   case invalidWriteCount(Int)
+  case missingRouterOutputs
   case zeroLengthWrite
   case metadataFileAlreadyExists(String)
   case metadataFileCreationFailed(String, Int32)
@@ -31,6 +32,8 @@ public enum BuildServiceFrameRelayError: LocalizedError, Equatable {
       return "Build-service frame source returned invalid read count \(count)."
     case .invalidWriteCount(let count):
       return "Build-service frame destination returned invalid write count \(count)."
+    case .missingRouterOutputs:
+      return "An intercepting build-service frame pump has no bidirectional router outputs."
     case .zeroLengthWrite:
       return "Build-service frame destination returned a zero-length write."
     case .metadataFileAlreadyExists(let path):
@@ -165,7 +168,7 @@ final class FileDescriptorFrameWriter: FrameByteWriter {
 }
 
 extension FrameByteWriter {
-  fileprivate func writeAll(_ buffer: UnsafeRawBufferPointer) throws {
+  func writeAll(_ buffer: UnsafeRawBufferPointer) throws {
     var offset = 0
     while offset < buffer.count {
       let slice = UnsafeRawBufferPointer(rebasing: buffer[offset...])
@@ -193,22 +196,25 @@ final class BuildServiceFramePump {
 
   private let direction: BuildServiceFrameDirection
   private let reader: FrameByteReader
-  private let writer: FrameByteWriter
+  private let sink: SerializedFrameSink
   private let recorder: BuildServiceFrameMetadataRecorder?
   private let interceptor: (any BuildServiceFrameInterceptor)?
+  private let outputs: BuildServiceFrameOutputs?
 
   init(
     direction: BuildServiceFrameDirection,
     reader: FrameByteReader,
-    writer: FrameByteWriter,
+    sink: SerializedFrameSink,
     recorder: BuildServiceFrameMetadataRecorder?,
-    interceptor: (any BuildServiceFrameInterceptor)? = nil
+    interceptor: (any BuildServiceFrameInterceptor)? = nil,
+    outputs: BuildServiceFrameOutputs? = nil
   ) {
     self.direction = direction
     self.reader = reader
-    self.writer = writer
+    self.sink = sink
     self.recorder = recorder
     self.interceptor = interceptor
+    self.outputs = outputs
   }
 
   func run() throws -> BuildServiceFramePumpSummary {
@@ -230,8 +236,6 @@ final class BuildServiceFramePump {
         throw BuildServiceFrameRelayError.payloadTooLarge(payloadLength)
       }
 
-      try header.withUnsafeBytes { try writer.writeAll($0) }
-
       var payloadBytesRead: UInt32 = 0
       var payloadHasher = SHA256()
       var messageNamePeeker = MessagePackMessageNamePeeker()
@@ -239,29 +243,21 @@ final class BuildServiceFramePump {
         payloadBuffer = [UInt8](repeating: 0, count: 64 * 1024)
       }
 
-      while payloadBytesRead < payloadLength {
-        let remaining = Int(payloadLength - payloadBytesRead)
-        let requestedCount = min(remaining, payloadBuffer!.count)
-        let count = try payloadBuffer!.withUnsafeMutableBytes { bytes in
-          try reader.read(into: UnsafeMutableRawBufferPointer(rebasing: bytes[..<requestedCount]))
-        }
-        if count == 0 {
-          throw BuildServiceFrameRelayError.truncatedPayload(
-            expectedBytes: payloadLength,
-            actualBytes: payloadBytesRead
+      try sink.withStreamingFrame(header: header) { transaction in
+        while payloadBytesRead < payloadLength {
+          let count = try readPayloadChunk(
+            into: &payloadBuffer!,
+            totalRead: payloadBytesRead,
+            expected: payloadLength
           )
+          try payloadBuffer!.withUnsafeBytes { bytes in
+            let chunk = UnsafeRawBufferPointer(rebasing: bytes[..<count])
+            messageNamePeeker.consume(chunk)
+            payloadHasher.update(data: Data(bytes: chunk.baseAddress!, count: chunk.count))
+            try transaction.writePayload(chunk)
+          }
+          payloadBytesRead += UInt32(count)
         }
-        guard count > 0, count <= requestedCount else {
-          throw BuildServiceFrameRelayError.invalidReadCount(count)
-        }
-
-        try payloadBuffer!.withUnsafeBytes { bytes in
-          let chunk = UnsafeRawBufferPointer(rebasing: bytes[..<count])
-          messageNamePeeker.consume(chunk)
-          payloadHasher.update(data: Data(bytes: chunk.baseAddress!, count: chunk.count))
-          try writer.writeAll(chunk)
-        }
-        payloadBytesRead += UInt32(count)
       }
 
       frameCount += 1
@@ -282,6 +278,9 @@ final class BuildServiceFramePump {
   private func runIntercepting(with interceptor: any BuildServiceFrameInterceptor) throws
     -> BuildServiceFramePumpSummary
   {
+    guard let outputs else {
+      throw BuildServiceFrameRelayError.missingRouterOutputs
+    }
     var frameCount: UInt64 = 0
     var byteCount: UInt64 = 0
     var payloadBuffer: [UInt8]?
@@ -356,35 +355,45 @@ final class BuildServiceFramePump {
         let consumed = try interceptor.intercept(
           direction: direction,
           frame: frame,
-          send: { injectedFrame in
-            try Self.write(frame: injectedFrame, to: writer)
-          }
+          outputs: outputs
         )
         if !consumed {
-          try Self.write(frame: frame, to: writer)
+          try sink.send(frame)
         }
       } else {
-        if !discardOversizeInterceptedFrame {
-          try header.withUnsafeBytes { try writer.writeAll($0) }
-          try prefix.withUnsafeBytes { try writer.writeAll($0) }
-        }
         if payloadBytesRead < payloadLength, payloadBuffer == nil {
           payloadBuffer = [UInt8](repeating: 0, count: 64 * 1024)
         }
-        while payloadBytesRead < payloadLength {
-          let count = try readPayloadChunk(
-            into: &payloadBuffer!,
-            totalRead: payloadBytesRead,
-            expected: payloadLength
-          )
-          try payloadBuffer!.withUnsafeBytes { bytes in
-            let chunk = UnsafeRawBufferPointer(rebasing: bytes[..<count])
-            payloadHasher.update(data: Data(chunk))
-            if !discardOversizeInterceptedFrame {
-              try writer.writeAll(chunk)
+        if discardOversizeInterceptedFrame {
+          while payloadBytesRead < payloadLength {
+            let count = try readPayloadChunk(
+              into: &payloadBuffer!,
+              totalRead: payloadBytesRead,
+              expected: payloadLength
+            )
+            payloadBuffer!.withUnsafeBytes { bytes in
+              let chunk = UnsafeRawBufferPointer(rebasing: bytes[..<count])
+              payloadHasher.update(data: Data(chunk))
+            }
+            payloadBytesRead += UInt32(count)
+          }
+        } else {
+          try sink.withStreamingFrame(header: header) { transaction in
+            try prefix.withUnsafeBytes { try transaction.writePayload($0) }
+            while payloadBytesRead < payloadLength {
+              let count = try readPayloadChunk(
+                into: &payloadBuffer!,
+                totalRead: payloadBytesRead,
+                expected: payloadLength
+              )
+              try payloadBuffer!.withUnsafeBytes { bytes in
+                let chunk = UnsafeRawBufferPointer(rebasing: bytes[..<count])
+                payloadHasher.update(data: Data(chunk))
+                try transaction.writePayload(chunk)
+              }
+              payloadBytesRead += UInt32(count)
             }
           }
-          payloadBytesRead += UInt32(count)
         }
       }
 
@@ -446,11 +455,6 @@ final class BuildServiceFramePump {
       throw BuildServiceFrameRelayError.invalidReadCount(count)
     }
     return count
-  }
-
-  private static func write(frame: BuildServiceRawFrame, to writer: FrameByteWriter) throws {
-    try frame.header.withUnsafeBytes { try writer.writeAll($0) }
-    try frame.payload.withUnsafeBytes { try writer.writeAll($0) }
   }
 
   private func readHeader() throws -> [UInt8]? {
