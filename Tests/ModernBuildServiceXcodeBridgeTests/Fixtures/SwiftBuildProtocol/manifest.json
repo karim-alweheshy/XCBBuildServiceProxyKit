@@ -1,0 +1,460 @@
+{
+  "fixtures" : [
+    {
+      "byteSize" : 44,
+      "channels" : [
+        201
+      ],
+      "decodedSemanticFields" : {
+        "id" : "-1",
+        "sessionHandle" : "SESSION-1"
+      },
+      "file" : "request-build-start.frame",
+      "messageNames" : [
+        "BUILD_START"
+      ],
+      "sha256" : "d48ebeda2fccb2835da2a0b61a03e31e5f8581340774c81b834f4a8472502723"
+    },
+    {
+      "byteSize" : 45,
+      "channels" : [
+        202
+      ],
+      "decodedSemanticFields" : {
+        "id" : "-1",
+        "sessionHandle" : "SESSION-1"
+      },
+      "file" : "request-build-cancel.frame",
+      "messageNames" : [
+        "BUILD_CANCEL"
+      ],
+      "sha256" : "7b867d06f0a890c4b550922196eb57192b971107056896465c4f1aeeb4b5a679"
+    },
+    {
+      "byteSize" : 38,
+      "channels" : [
+        203
+      ],
+      "decodedSemanticFields" : {
+        "sessionHandle" : "SESSION-1"
+      },
+      "file" : "request-delete-session.frame",
+      "messageNames" : [
+        "DELETE_SESSION"
+      ],
+      "sha256" : "f99ef2a17e9af9adb5c8eee2e3894843c26906a6b56aaa005107e93cb11dd248"
+    },
+    {
+      "byteSize" : 36,
+      "channels" : [
+        201
+      ],
+      "decodedSemanticFields" : {
+        "id" : "-1"
+      },
+      "file" : "response-build-created-negative-one.frame",
+      "messageNames" : [
+        "BUILD_CREATED"
+      ],
+      "sha256" : "6daab7cccb7c68c206ee237971e0e6bddb95b361c780951ffb1c7b5c5bad6bc2"
+    },
+    {
+      "byteSize" : 36,
+      "channels" : [
+        204
+      ],
+      "decodedSemanticFields" : {
+        "id" : "-9223372036854775807"
+      },
+      "file" : "response-build-created-min-plus-one.frame",
+      "messageNames" : [
+        "BUILD_CREATED"
+      ],
+      "sha256" : "1f08ed4fff06c9a20cd44a0a81c196c9019471bab813a77bd59d4f8a5ef1d608"
+    },
+    {
+      "byteSize" : 18,
+      "channels" : [
+        202
+      ],
+      "decodedSemanticFields" : {
+        "wireAlias" : "VoidResponse=PingRequest"
+      },
+      "file" : "response-void.frame",
+      "messageNames" : [
+        "PING"
+      ],
+      "sha256" : "ea24d93c8bdcc05ec36d72ff19856eca114925b0241d365d7b8d82634e3888b2"
+    },
+    {
+      "byteSize" : 44,
+      "channels" : [
+        205
+      ],
+      "decodedSemanticFields" : {
+        "description" : "synthetic native failure"
+      },
+      "file" : "response-native-error.frame",
+      "messageNames" : [
+        "ERROR"
+      ],
+      "sha256" : "4cf06f7d69f2ed3d5825ed286a04ed6ebabdb28fec7d828634ae85a9e9e79119"
+    },
+    {
+      "byteSize" : 41,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "phase" : "preparation-completed"
+      },
+      "file" : "event-preparation.frame",
+      "messageNames" : [
+        "BUILD_PREPARATION_COMPLETED"
+      ],
+      "sha256" : "125dd329d38b127a40fcfc410184b3cbdd7fbcf659e74e8e73bb357dddaf7804"
+    },
+    {
+      "byteSize" : 46,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "-1"
+      },
+      "file" : "event-operation-started.frame",
+      "messageNames" : [
+        "BUILD_OPERATION_STARTED"
+      ],
+      "sha256" : "d3eaa99650a09fc8daded92816fa744509874e9fd05983efefe57235923090ff"
+    },
+    {
+      "byteSize" : 121,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "copiedCount" : "1",
+        "generatedCount" : "1"
+      },
+      "file" : "event-path-map.frame",
+      "messageNames" : [
+        "BUILD_OPERATION_REPORT_PATH_MAP"
+      ],
+      "sha256" : "b61a4281ddaafc2859a9837db47eed6441240da5cec66de25bd1bd231cb3593f"
+    },
+    {
+      "byteSize" : 310,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "guid" : "TARGET-A",
+        "id" : "1",
+        "name" : "App"
+      },
+      "file" : "event-target-started.frame",
+      "messageNames" : [
+        "BUILD_TARGET_STARTED"
+      ],
+      "sha256" : "4c61a31226eef308a655fd7ca0da2ab6da3f581f3412154f7a3a71a79548ce84"
+    },
+    {
+      "byteSize" : 194,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "1",
+        "stableSignature" : "rules_xcodeproj.bazel.v1://app:App",
+        "targetID" : "1"
+      },
+      "file" : "event-task-started.frame",
+      "messageNames" : [
+        "BUILD_TASK_STARTED"
+      ],
+      "sha256" : "15bd73701b718fd25e68eaac4883369613929cb9d5909b272d541eb5a22fcb34"
+    },
+    {
+      "byteSize" : 72,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "percentComplete" : "-1",
+        "showInLog" : "false"
+      },
+      "file" : "event-progress.frame",
+      "messageNames" : [
+        "BUILD_PROGRESS_UPDATED"
+      ],
+      "sha256" : "0e87930bb0c4ed3d0fb6da560397f95f816cf6ed0073f131c24a7ba9fd6dd683"
+    },
+    {
+      "byteSize" : 100,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "dataUTF8" : "synthetic output\\n",
+        "taskID" : "1",
+        "taskSignature" : "nil"
+      },
+      "file" : "event-console.frame",
+      "messageNames" : [
+        "BUILD_CONSOLE_OUTPUT_EMITTED"
+      ],
+      "sha256" : "f6b86e07e1a8fa8b5a4c8836f22b65737326b8bcff6d064b55881707dbaf7d6b"
+    },
+    {
+      "byteSize" : 41,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "1"
+      },
+      "file" : "event-target-ended.frame",
+      "messageNames" : [
+        "BUILD_TARGET_ENDED"
+      ],
+      "sha256" : "59af64c2230e93020608fc00434bea8cafc65e58d6f9d5a524cade384f18e868"
+    },
+    {
+      "byteSize" : 496,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "column" : "3",
+        "kind" : "error",
+        "line" : "7"
+      },
+      "file" : "event-diagnostic-error.frame",
+      "messageNames" : [
+        "BUILD_DIAGNOSTIC_EMITTED"
+      ],
+      "sha256" : "eed73ab488d19dbf8a648404613788a4fdeabaa1e39d768edd6a83107a3c5e1f"
+    },
+    {
+      "byteSize" : 495,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "column" : "3",
+        "kind" : "note",
+        "line" : "7"
+      },
+      "file" : "event-diagnostic-note.frame",
+      "messageNames" : [
+        "BUILD_DIAGNOSTIC_EMITTED"
+      ],
+      "sha256" : "5f39902d2b08511e603f69f29019d16f4e5ef0d00d2c3b4041df8ec9a798882c"
+    },
+    {
+      "byteSize" : 497,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "column" : "3",
+        "kind" : "remark",
+        "line" : "7"
+      },
+      "file" : "event-diagnostic-remark.frame",
+      "messageNames" : [
+        "BUILD_DIAGNOSTIC_EMITTED"
+      ],
+      "sha256" : "318c0abeb9f37f8ff227329219b8a9d07685dbcbfa81d0acf50c1b1ade4c69c8"
+    },
+    {
+      "byteSize" : 498,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "column" : "3",
+        "kind" : "warning",
+        "line" : "7"
+      },
+      "file" : "event-diagnostic-warning.frame",
+      "messageNames" : [
+        "BUILD_DIAGNOSTIC_EMITTED"
+      ],
+      "sha256" : "1f3c60f97574321f117196a27d29cb178b6034de8b16c37ecf96eb1f3d204e0b"
+    },
+    {
+      "byteSize" : 206,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "1",
+        "signalled" : "true",
+        "status" : "cancelled"
+      },
+      "file" : "event-task-ended-cancelled.frame",
+      "messageNames" : [
+        "BUILD_TASK_ENDED"
+      ],
+      "sha256" : "856db4ee19c251786ac47fb55d9aae9ba6002ee2e380217474ba2e9f095568c3"
+    },
+    {
+      "byteSize" : 207,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "1",
+        "signalled" : "false",
+        "status" : "failed"
+      },
+      "file" : "event-task-ended-failed.frame",
+      "messageNames" : [
+        "BUILD_TASK_ENDED"
+      ],
+      "sha256" : "846ab090a6d43c8672def7e8b0b71e2cd1c7926c52008edf2bba5e44012cb90a"
+    },
+    {
+      "byteSize" : 207,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "1",
+        "signalled" : "false",
+        "status" : "succeeded"
+      },
+      "file" : "event-task-ended-succeeded.frame",
+      "messageNames" : [
+        "BUILD_TASK_ENDED"
+      ],
+      "sha256" : "76025fa1649a79b4c58d1990dc6422958f8bd72dcac133053ac20e461f116768"
+    },
+    {
+      "byteSize" : 56,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "-1",
+        "status" : "cancelled"
+      },
+      "file" : "event-operation-ended-cancelled.frame",
+      "messageNames" : [
+        "BUILD_OPERATION_ENDED"
+      ],
+      "sha256" : "8f5eb1201176ea0260cbc1e68fb77c5a43306fbff7eb8dd7822fba1c8aee4d7b"
+    },
+    {
+      "byteSize" : 56,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "-1",
+        "status" : "failed"
+      },
+      "file" : "event-operation-ended-failed.frame",
+      "messageNames" : [
+        "BUILD_OPERATION_ENDED"
+      ],
+      "sha256" : "5ca433b91afdbd320f701a2aff3915d9aee090343caa7a3b8aafbbc08e6785fd"
+    },
+    {
+      "byteSize" : 56,
+      "channels" : [
+        100
+      ],
+      "decodedSemanticFields" : {
+        "id" : "-1",
+        "status" : "succeeded"
+      },
+      "file" : "event-operation-ended-succeeded.frame",
+      "messageNames" : [
+        "BUILD_OPERATION_ENDED"
+      ],
+      "sha256" : "e077b0f1e49f24b8ed1837660a98792234854782167a8d0ac2418feac7d174bb"
+    },
+    {
+      "byteSize" : 1188,
+      "channels" : [
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "decodedSemanticFields" : {
+        "frameCount" : "10",
+        "id" : "-1",
+        "result" : "succeeded"
+      },
+      "file" : "stream-success.frames",
+      "messageNames" : [
+        "BUILD_PREPARATION_COMPLETED",
+        "BUILD_OPERATION_STARTED",
+        "BUILD_OPERATION_REPORT_PATH_MAP",
+        "BUILD_TARGET_STARTED",
+        "BUILD_TASK_STARTED",
+        "BUILD_PROGRESS_UPDATED",
+        "BUILD_CONSOLE_OUTPUT_EMITTED",
+        "BUILD_TASK_ENDED",
+        "BUILD_TARGET_ENDED",
+        "BUILD_OPERATION_ENDED"
+      ],
+      "sha256" : "0e739d39b0cd43ca9e84970ac03bf9e5dc86ba08f7d68f56d2dcb4391e24d4bb"
+    },
+    {
+      "byteSize" : 800,
+      "channels" : [
+        100,
+        100,
+        100,
+        100
+      ],
+      "decodedSemanticFields" : {
+        "frameCount" : "4",
+        "id" : "-1",
+        "result" : "failed"
+      },
+      "file" : "stream-failure.frames",
+      "messageNames" : [
+        "BUILD_DIAGNOSTIC_EMITTED",
+        "BUILD_TASK_ENDED",
+        "BUILD_TARGET_ENDED",
+        "BUILD_OPERATION_ENDED"
+      ],
+      "sha256" : "6ca07bd284065e98ec3712f28880c3b3a1aaf1642b323e4277082b8a29468328"
+    },
+    {
+      "byteSize" : 303,
+      "channels" : [
+        100,
+        100,
+        100
+      ],
+      "decodedSemanticFields" : {
+        "frameCount" : "3",
+        "id" : "-1",
+        "result" : "cancelled"
+      },
+      "file" : "stream-cancel.frames",
+      "messageNames" : [
+        "BUILD_TASK_ENDED",
+        "BUILD_TARGET_ENDED",
+        "BUILD_OPERATION_ENDED"
+      ],
+      "sha256" : "b406999c25e61bfd5c455d00dc5bd26a1d628b6bb219d93b07f3e813f0fd50dc"
+    }
+  ],
+  "schemaVersion" : 1,
+  "swiftBuildCommit" : "e4f6fc77ebe727657dadfedf50462f5a1a626ead",
+  "xcodeProductBuildVersion" : "17F42"
+}
