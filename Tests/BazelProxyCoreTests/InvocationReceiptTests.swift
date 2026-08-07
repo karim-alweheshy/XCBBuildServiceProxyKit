@@ -50,7 +50,7 @@ final class InvocationReceiptTests: XCTestCase {
     var wrongModes = validReceipt(plan: plan, invocation: invocation)
     wrongModes["modes"] = [
       "action": "build",
-      "config": "rules_xcodeproj",
+      "config": "_rules_xcodeproj_build",
       "coverage": "NO",
       "previews": "YES",
     ]
@@ -59,6 +59,114 @@ final class InvocationReceiptTests: XCTestCase {
       try InvocationReceiptValidator.loadAndValidate(for: plan, invocation: invocation)
     ) { error in
       XCTAssertEqual(error as? InvocationReceiptError, .bindingMismatch("build modes"))
+    }
+  }
+
+  func testBindsEffectiveConfigModeAndCommandOption() throws {
+    let fixture = try ManifestFixture()
+    let plan = try fixture.plan(operationID: "receipt-config-binding")
+    let invocation = try AdapterInvocationFactory(
+      operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+    ).make(for: plan, processEnvironment: [:])
+
+    var wrongMode = validReceipt(plan: plan, invocation: invocation)
+    wrongMode["modes"] = [
+      "action": "build",
+      "config": "rules_xcodeproj",
+      "coverage": "NO",
+      "previews": "NO",
+    ]
+    try writeReceipt(wrongMode, to: invocation.receiptURL)
+    XCTAssertThrowsError(
+      try InvocationReceiptValidator.loadAndValidate(for: plan, invocation: invocation)
+    ) { error in
+      XCTAssertEqual(error as? InvocationReceiptError, .bindingMismatch("build modes"))
+    }
+
+    var missingOption = validReceipt(plan: plan, invocation: invocation)
+    missingOption["commandOptions"] = []
+    try writeReceipt(missingOption, to: invocation.receiptURL)
+    XCTAssertThrowsError(
+      try InvocationReceiptValidator.loadAndValidate(for: plan, invocation: invocation)
+    ) { error in
+      XCTAssertEqual(error as? InvocationReceiptError, .bindingMismatch("build modes"))
+    }
+
+    var duplicateOption = validReceipt(plan: plan, invocation: invocation)
+    duplicateOption["commandOptions"] = [
+      "--config=_rules_xcodeproj_build",
+      "--config=_rules_xcodeproj_build",
+    ]
+    try writeReceipt(duplicateOption, to: invocation.receiptURL)
+    XCTAssertThrowsError(
+      try InvocationReceiptValidator.loadAndValidate(for: plan, invocation: invocation)
+    ) { error in
+      XCTAssertEqual(error as? InvocationReceiptError, .bindingMismatch("build modes"))
+    }
+  }
+
+  func testBindsIndexPreviewCoverageAndSuppressedCoverageConfigs() throws {
+    let cases: [([String: String], String)] = [
+      (
+        [
+          "ACTION": "indexbuild",
+          "BAZEL_CONFIG": "rules_xcodeproj",
+          "SRCROOT": "/workspace",
+        ],
+        "rules_xcodeproj_indexbuild"
+      ),
+      (
+        [
+          "ACTION": "build",
+          "BAZEL_CONFIG": "rules_xcodeproj",
+          "ENABLE_PREVIEWS": "YES",
+          "SRCROOT": "/workspace",
+        ],
+        "rules_xcodeproj_swiftuipreviews"
+      ),
+      (
+        [
+          "ACTION": "build",
+          "BAZEL_CONFIG": "rules_xcodeproj",
+          "CLANG_COVERAGE_MAPPING": "YES",
+          "SRCROOT": "/workspace",
+        ],
+        "rules_xcodeproj_coverage"
+      ),
+      (
+        [
+          "ACTION": "build",
+          "BAZEL_CONFIG": "rules_xcodeproj",
+          "BAZEL_SUPPRESS_COVERAGE_BUILD": "YES",
+          "CLANG_COVERAGE_MAPPING": "YES",
+          "SRCROOT": "/workspace",
+        ],
+        "_rules_xcodeproj_build"
+      ),
+    ]
+
+    for (index, item) in cases.enumerated() {
+      let fixture = try ManifestFixture()
+      let plan = try fixture.plan(
+        evaluatedEnvironment: item.0,
+        operationID: "receipt-config-\(index)"
+      )
+      let invocation = try AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      ).make(for: plan, processEnvironment: [:])
+      let receiptObject = validReceipt(plan: plan, invocation: invocation)
+      try writeReceipt(receiptObject, to: invocation.receiptURL)
+
+      let receipt = try InvocationReceiptValidator.loadAndValidate(
+        for: plan,
+        invocation: invocation
+      )
+      XCTAssertEqual(receipt.modes["config"], item.1)
+      XCTAssertEqual(
+        receipt.commandOptions.filter { $0.hasPrefix("--config=") },
+        [
+          "--config=\(item.1)"
+        ])
     }
   }
 
@@ -227,18 +335,19 @@ final class InvocationReceiptTests: XCTestCase {
     plan: ResolvedBuildPlan,
     invocation: AdapterInvocation
   ) -> [String: Any] {
-    [
+    let config = effectiveConfig(for: plan.evaluatedEnvironment)
+    return [
       "bazelrcs": [],
       "command": "build",
-      "commandOptions": [],
+      "commandOptions": ["--config=\(config)"],
       "environmentKeys": ["HOME", "PATH"],
       "labels": Array(Set(plan.adapterRequest.labels)).sorted(),
       "materialization": ["contract": "manifest-v2"],
       "modes": [
-        "action": "build",
-        "config": "rules_xcodeproj",
-        "coverage": "NO",
-        "previews": "NO",
+        "action": plan.evaluatedEnvironment["ACTION"] ?? "build",
+        "config": config,
+        "coverage": plan.evaluatedEnvironment["CLANG_COVERAGE_MAPPING"] ?? "NO",
+        "previews": plan.evaluatedEnvironment["ENABLE_PREVIEWS"] ?? "NO",
       ],
       "outputGroups": Array(
         Set(plan.adapterRequest.outputGroups + ["index_import", "target_ids_list"])
@@ -250,6 +359,22 @@ final class InvocationReceiptTests: XCTestCase {
       "targets": [plan.manifest.invocation.generatorLabel],
       "workingDirectory": invocation.workingDirectoryURL.path,
     ]
+  }
+
+  private func effectiveConfig(for environment: [String: String]) -> String {
+    let base = environment["BAZEL_CONFIG"] ?? "rules_xcodeproj"
+    if environment["ACTION"] == "indexbuild" {
+      return "\(base)_indexbuild"
+    }
+    if environment["ENABLE_PREVIEWS"] == "YES" {
+      return "\(base)_swiftuipreviews"
+    }
+    if environment["CLANG_COVERAGE_MAPPING"] == "YES",
+      environment["BAZEL_SUPPRESS_COVERAGE_BUILD"] != "YES"
+    {
+      return "\(base)_coverage"
+    }
+    return "_\(base)_build"
   }
 
   private func writeReceipt(_ object: [String: Any], to url: URL) throws {

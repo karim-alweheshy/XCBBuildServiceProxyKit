@@ -127,7 +127,7 @@ final class FakeAdapterIntegrationTests: XCTestCase {
       '{"finished":{"overallSuccess":true}}' \
       > "$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
     /bin/cat > "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT" <<EOF
-    {"bazelrcs":[],"command":"build","commandOptions":[],"environmentKeys":["HOME","PATH"],"labels":["//app:App"],"materialization":{"contract":"manifest-v2"},"modes":{"action":"build","config":"rules_xcodeproj","coverage":"NO","previews":"NO"},"outputGroups":["bp app-app","index_import","target_ids_list"],"provenance":{"bepPath":"$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"},"schemaVersion":1,"startupOptions":[],"targetIDs":["app-app"],"targets":["//app:AppProject"],"workingDirectory":"$PWD"}
+    {"bazelrcs":[],"command":"build","commandOptions":["--config=_rules_xcodeproj_build"],"environmentKeys":["HOME","PATH"],"labels":["//app:App"],"materialization":{"contract":"manifest-v2"},"modes":{"action":"build","config":"_rules_xcodeproj_build","coverage":"NO","previews":"NO"},"outputGroups":["bp app-app","index_import","target_ids_list"],"provenance":{"bepPath":"$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"},"schemaVersion":1,"startupOptions":[],"targetIDs":["app-app"],"targets":["//app:AppProject"],"workingDirectory":"$PWD"}
     EOF
     /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
     printf 'WARNING: fake adapter warning\n' >&2
