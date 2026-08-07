@@ -54,6 +54,50 @@ final class ProductMaterializerTests: XCTestCase {
     XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
   }
 
+  func testMaterializationCreatesMissingTargetBuildDirectory() throws {
+    let fixture = try ManifestFixture()
+    let source = try createProduct(
+      at: fixture.workspaceURL.appendingPathComponent("bazel-out/products/App.app"),
+      contents: "new-product"
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "missing/DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let destinationRoot = destination.deletingLastPathComponent()
+    let plan = try makePlan(fixture: fixture, products: [(source, destination)])
+    XCTAssertFalse(FileManager.default.fileExists(atPath: destinationRoot.path))
+
+    let receipt = try ProductMaterializer().materialize(plan: plan)
+
+    XCTAssertEqual(
+      receipt.products.map(\.destinationURL),
+      [destination.resolvingSymlinksInPath().standardizedFileURL]
+    )
+    XCTAssertEqual(try productContents(destination), "new-product")
+  }
+
+  func testCleanTreatsMissingTargetBuildDirectoryAsAlreadyClean() throws {
+    let fixture = try ManifestFixture()
+    let source = try createProduct(
+      at: fixture.workspaceURL.appendingPathComponent("bazel-out/products/App.app"),
+      contents: "source"
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "missing/DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let destinationRoot = destination.deletingLastPathComponent()
+    let plan = try makePlan(fixture: fixture, products: [(source, destination)])
+
+    let receipt = try ProductMaterializer().clean(plan: plan)
+
+    XCTAssertEqual(receipt.absentDestinations.count, 1)
+    XCTAssertEqual(receipt.absentDestinations.first?.lastPathComponent, "App.app")
+    XCTAssertEqual(receipt.removedDestinations, [])
+    XCTAssertFalse(FileManager.default.fileExists(atPath: destinationRoot.path))
+  }
+
   func testRollsBackAllPublishedProductsWhenSecondCommitFails() throws {
     let fixture = try ManifestFixture()
     var manifestObject = fixture.baseManifest()

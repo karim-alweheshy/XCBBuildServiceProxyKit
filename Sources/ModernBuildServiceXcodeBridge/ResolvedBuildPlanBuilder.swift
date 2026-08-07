@@ -77,7 +77,7 @@ public enum ResolvedBuildPlanRejection: LocalizedError, Equatable, Sendable {
   case productBasenameMismatch(targetGUID: String)
   case projectContainerMismatch
   case routing(TargetRoutingError)
-  case targetIdentityMismatch(targetGUID: String)
+  case targetIdentityMismatch(targetGUID: String, field: String)
   case unexpectedSettingsSnapshot(String)
   case unsafeOperationID
 
@@ -113,8 +113,9 @@ public enum ResolvedBuildPlanRejection: LocalizedError, Equatable, Sendable {
         "The build request, evaluated project, and verified manifest do not identify one project container."
     case .routing(let error):
       return error.localizedDescription
-    case .targetIdentityMismatch(let targetGUID):
-      return "Target \(targetGUID) evaluated identity does not match its resolved manifest target."
+    case .targetIdentityMismatch(let targetGUID, let field):
+      return
+        "Target \(targetGUID) evaluated \(field) does not match its resolved manifest target."
     case .unexpectedSettingsSnapshot(let guid):
       return "An exported-settings snapshot was supplied for unexpected target GUID \(guid)."
     case .unsafeOperationID:
@@ -324,15 +325,15 @@ public enum ResolvedBuildPlanBuilder {
     targetInputs: [TargetInput],
     mappings: [BuildProxyManifest.Target]
   ) throws -> ResolvedBuildPlan {
-    let inputByGUID = Dictionary(
-      uniqueKeysWithValues: targetInputs.map {
-        ($0.configuredTarget.guid, $0)
-      })
     var resolvedTargets = [ResolvedTargetPlan]()
     for mapping in mappings {
-      guard let targetInput = inputByGUID[mapping.xcodeTargetGUID] else {
+      let matchingInputs = targetInputs.filter {
+        matchesResolvedTarget($0, mapping: mapping)
+      }
+      guard matchingInputs.count == 1, let targetInput = matchingInputs.first else {
         throw ResolvedBuildPlanRejection.targetIdentityMismatch(
-          targetGUID: mapping.xcodeTargetGUID
+          targetGUID: mapping.xcodeTargetGUID,
+          field: "resolved target association"
         )
       }
       try validateRequiredPlanRoles(targetInput.snapshot)
@@ -571,14 +572,31 @@ public enum ResolvedBuildPlanBuilder {
     _ targetInput: TargetInput,
     mapping: BuildProxyManifest.Target
   ) throws {
-    guard targetInput.configuredTarget.guid == mapping.xcodeTargetGUID,
-      targetInput.snapshot.value(for: .bazelLabel) == mapping.bazelLabel,
-      targetInput.snapshot.value(for: .bazelTargetID) == mapping.targetID
-    else {
+    guard targetInput.snapshot.value(for: .bazelLabel) == mapping.bazelLabel else {
       throw ResolvedBuildPlanRejection.targetIdentityMismatch(
-        targetGUID: targetInput.configuredTarget.guid
+        targetGUID: targetInput.configuredTarget.guid,
+        field: ResolvedBuildPlanSettingRole.bazelLabel.rawValue
       )
     }
+    guard targetInput.snapshot.value(for: .bazelTargetID) == mapping.targetID else {
+      throw ResolvedBuildPlanRejection.targetIdentityMismatch(
+        targetGUID: targetInput.configuredTarget.guid,
+        field: ResolvedBuildPlanSettingRole.bazelTargetID.rawValue
+      )
+    }
+  }
+
+  private static func matchesResolvedTarget(
+    _ targetInput: TargetInput,
+    mapping: BuildProxyManifest.Target
+  ) -> Bool {
+    if let targetID = nonempty(targetInput.snapshot.value(for: .bazelTargetID)) {
+      return targetID == mapping.targetID
+    }
+    if let bazelLabel = nonempty(targetInput.snapshot.value(for: .bazelLabel)) {
+      return bazelLabel == mapping.bazelLabel
+    }
+    return targetInput.configuredTarget.guid == mapping.xcodeTargetGUID
   }
 
   private static func resolveProductPaths(

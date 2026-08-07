@@ -200,6 +200,7 @@ public final class ProductMaterializer: @unchecked Sendable {
         paths,
         mapping: target.mapping,
         plan: plan,
+        createRootIfMissing: true,
         fileManager: fileManager
       )
       guard destinations.insert(destination.path).inserted else {
@@ -329,6 +330,7 @@ public final class ProductMaterializer: @unchecked Sendable {
         paths,
         mapping: target.mapping,
         plan: plan,
+        createRootIfMissing: false,
         fileManager: fileManager
       )
       guard destinations.insert(destination.path).inserted else {
@@ -441,6 +443,7 @@ public final class ProductMaterializer: @unchecked Sendable {
     _ paths: ResolvedProductPaths,
     mapping: BuildProxyManifest.Target,
     plan: ResolvedBuildPlan,
+    createRootIfMissing: Bool,
     fileManager: FileManager
   ) throws -> URL {
     let destinationURL = paths.destinationProductURL
@@ -454,7 +457,8 @@ public final class ProductMaterializer: @unchecked Sendable {
     else {
       throw ProductMaterializationError.unsafeDestination(destinationURL.absoluteString)
     }
-    let root = rootURL.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+    let lexicalRoot = rootURL.standardizedFileURL
+    let root = physicalURLAllowingMissingLeaf(lexicalRoot, fileManager: fileManager)
     let forbiddenRoots = [
       URL(fileURLWithPath: "/", isDirectory: true).standardizedFileURL,
       FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath()
@@ -465,21 +469,71 @@ public final class ProductMaterializer: @unchecked Sendable {
     guard !forbiddenRoots.contains(root) else {
       throw ProductMaterializationError.unsafeDestination(root.path)
     }
-    try validateDirectoryRoot(root, error: .unsafeDestination(root.path), fileManager: fileManager)
+    if fileManager.fileExists(atPath: root.path) {
+      try validateDirectoryRoot(
+        root,
+        error: .unsafeDestination(root.path),
+        fileManager: fileManager
+      )
+    } else if createRootIfMissing {
+      do {
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        try validateDirectoryRoot(
+          root,
+          error: .unsafeDestination(root.path),
+          fileManager: fileManager
+        )
+      } catch {
+        throw ProductMaterializationError.unsafeDestination(root.path)
+      }
+      guard root.resolvingSymlinksInPath().standardizedFileURL == root else {
+        throw ProductMaterializationError.unsafeDestination(root.path)
+      }
+    }
 
     let lexical = destinationURL.standardizedFileURL
+    let lexicalExpected = lexicalRoot.appendingPathComponent(
+      paths.fullProductName,
+      isDirectory: mapping.product.materialization == .copyTree
+    ).standardizedFileURL
+    guard lexical == lexicalExpected else {
+      throw ProductMaterializationError.unsafeDestination(lexical.path)
+    }
+    let destination = root.appendingPathComponent(
+      paths.fullProductName,
+      isDirectory: mapping.product.materialization == .copyTree
+    ).standardizedFileURL
     if fileManager.fileExists(atPath: lexical.path) {
       try rejectSymbolicLink(lexical, fileManager: fileManager)
+      guard lexical.resolvingSymlinksInPath().standardizedFileURL == destination else {
+        throw ProductMaterializationError.unsafeDestination(lexical.path)
+      }
     }
-    let destination = lexical.resolvingSymlinksInPath().standardizedFileURL
-    let expected = root.appendingPathComponent(paths.fullProductName).standardizedFileURL
-    guard destination == expected,
-      destination.deletingLastPathComponent() == root,
+    guard destination.deletingLastPathComponent() == root,
       destination.lastPathComponent == mapping.product.basename
     else {
       throw ProductMaterializationError.unsafeDestination(destination.path)
     }
     return destination
+  }
+
+  private func physicalURLAllowingMissingLeaf(
+    _ url: URL,
+    fileManager: FileManager
+  ) -> URL {
+    var existingAncestor = url.standardizedFileURL
+    var missingComponents = [String]()
+    while existingAncestor.path != "/",
+      !fileManager.fileExists(atPath: existingAncestor.path)
+    {
+      missingComponents.append(existingAncestor.lastPathComponent)
+      existingAncestor.deleteLastPathComponent()
+    }
+    var physical = existingAncestor.resolvingSymlinksInPath().standardizedFileURL
+    for component in missingComponents.reversed() {
+      physical.appendPathComponent(component, isDirectory: true)
+    }
+    return physical.standardizedFileURL
   }
 
   private func validateDirectoryRoot(

@@ -193,6 +193,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
   private let condition = NSCondition()
   private let configuration: BazelBuildServiceRouterConfiguration
   private let executor: any BazelOperationExecuting
+  private let operationDirectoryNamespace = UUID().uuidString.lowercased()
   private let processEnvironment: [String: String]
   private let queryTimeout: TimeInterval
 
@@ -1540,7 +1541,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     let sequence = nextOperationSequence
     nextOperationSequence += 1
     condition.unlock()
-    return "xcode-\(sequence)"
+    return "xcode-\(operationDirectoryNamespace)-\(sequence)"
   }
 
   private func asyncTaskDidFinish() {

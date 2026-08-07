@@ -66,6 +66,33 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(executor.executionCount, 1)
   }
 
+  func testSeparateRouterProcessesAllocateDistinctOperationDirectories() throws {
+    let fixture = try PlanBuilderFixture()
+    let executor = RouterFakeExecutor(behavior: .succeedWithEvents)
+    let firstHarness = RouterHarness(fixture: fixture, executor: executor)
+    let secondHarness = RouterHarness(fixture: fixture, executor: executor)
+
+    for (index, harness) in [firstHarness, secondHarness].enumerated() {
+      let create = makeCreateBuildRequest(
+        targets: [ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil)],
+        responseChannel: UInt64(211 + index)
+      )
+      XCTAssertTrue(try harness.sendClient(create, channel: UInt64(111 + index)))
+      XCTAssertEqual(try harness.createdID(on: UInt64(111 + index)), -1)
+      XCTAssertTrue(
+        try harness.sendClient(
+          BuildStartRequest(sessionHandle: create.sessionHandle, id: -1),
+          channel: UInt64(121 + index)
+        )
+      )
+      XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationEnded.name))
+    }
+
+    XCTAssertEqual(executor.operationIDs.count, 2)
+    XCTAssertNotEqual(executor.operationIDs[0], executor.operationIDs[1])
+    XCTAssertTrue(executor.operationIDs.allSatisfy { $0.hasPrefix("xcode-") })
+  }
+
   func testUnrelatedProjectForwardsCreateAndNativeTerminalObservationsRemainTransparent() throws {
     let fixture = try PlanBuilderFixture()
     let harness = RouterHarness(fixture: fixture)
@@ -1209,9 +1236,14 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
   private let behavior: Behavior
   private let lock = NSLock()
   private var count = 0
+  private var recordedOperationIDs = [String]()
 
   var executionCount: Int {
     lock.withLock { count }
+  }
+
+  var operationIDs: [String] {
+    lock.withLock { recordedOperationIDs }
   }
 
   init(behavior: Behavior) {
@@ -1223,7 +1255,10 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
     processEnvironment: [String: String],
     onEvent: @escaping @Sendable (BazelOperationExecutionEvent) async throws -> Void
   ) async -> BazelOperationExecutionResult {
-    lock.withLock { count += 1 }
+    lock.withLock {
+      count += 1
+      recordedOperationIDs.append(plan.operationID)
+    }
     started.signal()
     switch behavior {
     case .signalledCancellation:
