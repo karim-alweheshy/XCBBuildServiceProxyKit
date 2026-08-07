@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 
@@ -11,6 +12,63 @@ final class ManifestTests: XCTestCase {
     XCTAssertEqual(manifest.schemaVersion, 2)
     XCTAssertEqual(manifest.project.containerName, "App.xcodeproj")
     XCTAssertEqual(manifest.targets.map(\.targetID), ["app-app"])
+  }
+
+  func testVerifiedLoadHashesTheExactDecodedSnapshot() throws {
+    let fixture = try ManifestFixture()
+    let data = try Data(contentsOf: fixture.manifestURL)
+    let expectedSHA256 = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+
+    let loaded = try BuildProxyManifest.loadVerified(
+      from: fixture.manifestURL,
+      expecting: BuildProxyManifestExpectation(
+        projectContainerURL: fixture.projectURL,
+        projectIdentity: "project-identity"
+      ),
+      expectedSHA256: expectedSHA256
+    )
+
+    XCTAssertEqual(loaded.manifest.schemaVersion, 2)
+    XCTAssertEqual(loaded.fileIdentity.algorithm, "sha256")
+    XCTAssertEqual(loaded.fileIdentity.byteSize, UInt64(data.count))
+    XCTAssertEqual(loaded.fileIdentity.hex, expectedSHA256)
+  }
+
+  func testVerifiedLoadRejectsMalformedAndMismatchedSHA256() throws {
+    let fixture = try ManifestFixture()
+    let expectation = BuildProxyManifestExpectation(
+      projectContainerURL: fixture.projectURL,
+      projectIdentity: "project-identity"
+    )
+
+    XCTAssertThrowsError(
+      try BuildProxyManifest.loadVerified(
+        from: fixture.manifestURL,
+        expecting: expectation,
+        expectedSHA256: "ABC"
+      )
+    ) { error in
+      XCTAssertEqual(error as? BuildProxyManifestError, .invalidExpectedSHA256("ABC"))
+    }
+
+    let wrongDigest = String(repeating: "0", count: 64)
+    XCTAssertThrowsError(
+      try BuildProxyManifest.loadVerified(
+        from: fixture.manifestURL,
+        expecting: expectation,
+        expectedSHA256: wrongDigest
+      )
+    ) { error in
+      guard
+        case .sha256Mismatch(let expected, let actual) =
+          error as? BuildProxyManifestError
+      else {
+        return XCTFail("Unexpected error: \(error)")
+      }
+      XCTAssertEqual(expected, wrongDigest)
+      XCTAssertEqual(actual.count, 64)
+      XCTAssertNotEqual(actual, wrongDigest)
+    }
   }
 
   func testRejectsUnknownJSONKey() throws {
