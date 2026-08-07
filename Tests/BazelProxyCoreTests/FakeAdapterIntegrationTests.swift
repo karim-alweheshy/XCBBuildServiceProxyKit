@@ -4,6 +4,230 @@ import XCTest
 @testable import BazelProxyCore
 
 final class FakeAdapterIntegrationTests: XCTestCase {
+  func testExecutorComposesOutputBEPReceiptAndMaterialization() async throws {
+    let fixture = try ManifestFixture()
+    let source = fixture.workspaceURL.appendingPathComponent(
+      "bazel-out/products/App.app",
+      isDirectory: true
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let plan = try planWithProduct(fixture: fixture, source: source, destination: destination)
+    try setAdapterScript(successScript(), fixture: fixture)
+    let collector = ExecutionEventCollector()
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      )
+    )
+
+    let result = await executor.execute(
+      plan: plan,
+      processEnvironment: ["HOME": "/safe/home", "PATH": "/usr/bin:/bin"]
+    ) { event in
+      await collector.append(event)
+    }
+
+    XCTAssertEqual(result.status, .succeeded)
+    XCTAssertNil(result.failure)
+    XCTAssertTrue(result.processCompletion?.succeeded == true)
+    XCTAssertTrue(result.bep?.result.succeeded == true)
+    XCTAssertEqual(result.invocationReceipt?.command, "build")
+    XCTAssertEqual(
+      result.productReceipt?.products.map { $0.destinationURL.standardizedFileURL },
+      [destination.standardizedFileURL]
+    )
+    XCTAssertEqual(
+      try String(contentsOf: destination.appendingPathComponent("artifact"), encoding: .utf8),
+      "fake-product"
+    )
+    let events = await collector.snapshot()
+    XCTAssertTrue(
+      events.contains { event in
+        guard case .processOutput(let output) = event else { return false }
+        return output.channel == .standardOutput
+      })
+    XCTAssertTrue(events.contains(.bep(.finished(succeeded: true))))
+  }
+
+  func testExecutorRejectsMalformedBEPBeforeReceiptOrProducts() async throws {
+    let fixture = try ManifestFixture()
+    try setAdapterScript(
+      """
+      #!/bin/sh
+      printf '{"finished":{"overallSuccess":tru' > "$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
+      exit 0
+      """,
+      fixture: fixture
+    )
+    let plan = try fixture.plan(operationID: "executor-malformed-bep")
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      )
+    )
+
+    let result = await executor.execute(plan: plan, processEnvironment: [:])
+
+    XCTAssertEqual(result.status, .failed)
+    XCTAssertEqual(result.failure?.phase, .bepValidation)
+    XCTAssertNil(result.invocationReceipt)
+    XCTAssertNil(result.productReceipt)
+  }
+
+  func testExecutorCleanNeverPreparesOrSpawnsAdapter() async throws {
+    let fixture = try ManifestFixture()
+    let source = fixture.workspaceURL.appendingPathComponent(
+      "bazel-out/products/App.app",
+      isDirectory: true
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let buildPlan = try planWithProduct(
+      fixture: fixture,
+      source: source,
+      destination: destination
+    )
+    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    try Data("existing".utf8).write(to: destination.appendingPathComponent("artifact"))
+    let cleanIntent = BuildIntent(
+      action: .clean,
+      architecture: buildPlan.intent.architecture,
+      configuration: buildPlan.intent.configuration,
+      mode: buildPlan.intent.mode,
+      platform: buildPlan.intent.platform,
+      projectContainerURL: buildPlan.intent.projectContainerURL,
+      requestedTargets: buildPlan.intent.requestedTargets,
+      schemeAction: "build",
+      workspaceURL: buildPlan.intent.workspaceURL
+    )
+    let cleanPlan = ResolvedBuildPlan(
+      adapterRequest: AdapterRequest(labels: [], outputGroups: [], targetIDs: []),
+      evaluatedEnvironment: buildPlan.evaluatedEnvironment,
+      intent: cleanIntent,
+      manifest: buildPlan.manifest,
+      manifestURL: buildPlan.manifestURL,
+      operationID: "clean-no-adapter",
+      targets: buildPlan.targets
+    )
+    let executor = BazelOperationExecutor(
+      invocationPreparer: RejectingInvocationPreparer(),
+      processSupervisor: RejectingProcessSupervisor()
+    )
+
+    let result = await executor.execute(plan: cleanPlan, processEnvironment: [:])
+
+    XCTAssertEqual(result.status, .succeeded)
+    XCTAssertEqual(result.cleanReceipt?.removedDestinations, [destination])
+    XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+    XCTAssertNil(result.operationDirectoryURL)
+    XCTAssertNil(result.processCompletion)
+  }
+
+  func testExecutorTaskCancellationTerminatesOwnedProcess() async throws {
+    let fixture = try ManifestFixture()
+    try setAdapterScript(
+      """
+      #!/bin/sh
+      trap '' TERM
+      printf 'adapter-running\n'
+      while :; do /bin/sleep 1; done
+      """,
+      fixture: fixture
+    )
+    let plan = try fixture.plan(operationID: "executor-cancel")
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      ),
+      cancellationGrace: 0.05
+    )
+    let task = Task {
+      await executor.execute(plan: plan, processEnvironment: [:])
+    }
+
+    try await Task.sleep(for: .milliseconds(100))
+    task.cancel()
+    let result = await task.value
+
+    XCTAssertEqual(result.status, .cancelled)
+    XCTAssertTrue(result.processCompletion?.cancellationRequested == true)
+    XCTAssertNil(result.bep)
+    XCTAssertNil(result.productReceipt)
+  }
+
+  func testExecutorIndexValidatesAdapterButSkipsProductMaterialization() async throws {
+    let fixture = try ManifestFixture()
+    let base = try fixture.plan(
+      evaluatedEnvironment: [
+        "ACTION": "indexbuild",
+        "BAZEL_CONFIG": "rules_xcodeproj",
+        "SRCROOT": "/workspace",
+      ],
+      operationID: "executor-index"
+    )
+    let mapping = base.manifest.targets[0]
+    let destination = fixture.rootURL.appendingPathComponent(
+      "DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let indexIntent = BuildIntent(
+      action: .indexBuild,
+      architecture: base.intent.architecture,
+      configuration: base.intent.configuration,
+      mode: .standard,
+      platform: base.intent.platform,
+      projectContainerURL: base.intent.projectContainerURL,
+      requestedTargets: base.intent.requestedTargets,
+      schemeAction: "build",
+      workspaceURL: base.intent.workspaceURL
+    )
+    let plan = ResolvedBuildPlan(
+      adapterRequest: AdapterRequest(
+        labels: [mapping.bazelLabel],
+        outputGroups: mapping.indexOutputGroups,
+        targetIDs: [mapping.targetID]
+      ),
+      evaluatedEnvironment: base.evaluatedEnvironment,
+      intent: indexIntent,
+      manifest: base.manifest,
+      manifestURL: base.manifestURL,
+      operationID: base.operationID,
+      targets: [
+        ResolvedTargetPlan(
+          mapping: mapping,
+          productPaths: ResolvedProductPaths(
+            bazelOutputRootURL: fixture.workspaceURL.appendingPathComponent("bazel-out"),
+            destinationProductURL: destination,
+            fullProductName: mapping.product.basename,
+            sourceProductURL: fixture.workspaceURL.appendingPathComponent(
+              "bazel-out/products/App.app"
+            ),
+            targetBuildDirectoryURL: destination.deletingLastPathComponent()
+          )
+        )
+      ]
+    )
+    try setAdapterScript(indexSuccessScript(), fixture: fixture)
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      )
+    )
+
+    let result = await executor.execute(plan: plan, processEnvironment: [:])
+
+    XCTAssertEqual(result.status, .succeeded)
+    XCTAssertTrue(result.bep?.result.succeeded == true)
+    XCTAssertEqual(result.invocationReceipt?.modes["config"], "rules_xcodeproj_indexbuild")
+    XCTAssertNil(result.productReceipt)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+  }
+
   func testFakeAdapterSuccessProducesValidatedBEPReceiptAndProduct() async throws {
     let fixture = try ManifestFixture()
     let source = fixture.workspaceURL.appendingPathComponent(
@@ -135,6 +359,21 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     """
   }
 
+  private func indexSuccessScript() -> String {
+    """
+    #!/bin/sh
+    set -eu
+    printf '%s\n' \
+      '{"buildMetrics":{"actionSummary":{"actionsExecuted":"1"}}}' \
+      '{"finished":{"overallSuccess":true}}' \
+      > "$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
+    /bin/cat > "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT" <<EOF
+    {"bazelrcs":[],"command":"build","commandOptions":["--config=rules_xcodeproj_indexbuild"],"environmentKeys":[],"labels":["//app:App"],"materialization":{"contract":"manifest-v2"},"modes":{"action":"indexbuild","config":"rules_xcodeproj_indexbuild","coverage":"NO","previews":"NO"},"outputGroups":["bc app-app","bi app-app","target_ids_list"],"provenance":{"bepPath":"$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"},"schemaVersion":1,"startupOptions":[],"targetIDs":["app-app"],"targets":["//app:AppProject"],"workingDirectory":"$PWD"}
+    EOF
+    /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
+    """
+  }
+
   private func planWithProduct(
     fixture: ManifestFixture,
     source: URL,
@@ -189,4 +428,35 @@ final class FakeAdapterIntegrationTests: XCTestCase {
   ) -> String {
     String(decoding: events.filter { $0.channel == channel }.flatMap { $0.bytes }, as: UTF8.self)
   }
+}
+
+private actor ExecutionEventCollector {
+  private var events = [BazelOperationExecutionEvent]()
+
+  func append(_ event: BazelOperationExecutionEvent) {
+    events.append(event)
+  }
+
+  func snapshot() -> [BazelOperationExecutionEvent] {
+    events
+  }
+}
+
+private struct RejectingInvocationPreparer: AdapterInvocationPreparing {
+  func make(
+    for plan: ResolvedBuildPlan,
+    processEnvironment: [String: String]
+  ) throws -> AdapterInvocation {
+    throw ExecutorTestFailure.unexpectedInvocation
+  }
+}
+
+private struct RejectingProcessSupervisor: ProcessSupervising {
+  func spawn(_ invocation: AdapterInvocation) throws -> any OwnedProcess {
+    throw ExecutorTestFailure.unexpectedInvocation
+  }
+}
+
+private enum ExecutorTestFailure: Error {
+  case unexpectedInvocation
 }
