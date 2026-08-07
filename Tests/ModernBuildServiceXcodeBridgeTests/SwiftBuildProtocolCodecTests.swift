@@ -15,7 +15,10 @@ final class SwiftBuildProtocolCodecTests: XCTestCase {
     let decoded = try SwiftBuildProtocolCodec.decodeCreateBuild(payload)
 
     XCTAssertEqual(CreateBuildRequest.name, "CREATE_BUILD")
-    XCTAssertEqual(MacroEvaluationRequest.name, "MACRO_EVALUATION_REQUEST")
+    XCTAssertEqual(
+      AllExportedMacrosAndValuesRequest.name,
+      "ALL_EXPORTED_MACROS_AND_VALUES_REQUEST"
+    )
     XCTAssertEqual(decoded, request)
   }
 
@@ -39,135 +42,105 @@ final class SwiftBuildProtocolCodecTests: XCTestCase {
     XCTAssertEqual(SwiftBuildProtocolCodec.encode(decoded), Array(fixture))
   }
 
-  func testMacroEvaluationCodecPreservesTargetAndEffectiveParameters() throws {
+  func testExportedSettingsRequestPreservesTargetAndEffectiveParameters() throws {
     let parameters = makeBuildParameters(action: "install", configuration: "Release")
-    let expressions = ["$(BAZEL_LABEL)", "$(TARGET_BUILD_DIR)"]
 
-    let payload = SwiftBuildProtocolCodec.encodeMacroEvaluationRequest(
+    let payload = SwiftBuildProtocolCodec.encodeAllExportedMacrosAndValuesRequest(
       sessionHandle: "SESSION-1",
       targetGUID: "TARGET-B",
-      buildParameters: parameters,
-      expressions: expressions
+      buildParameters: parameters
     )
     let message = try SwiftBuildProtocolCodec.decodeIPCMessage(payload)
-    let request = try XCTUnwrap(message.message as? MacroEvaluationRequest)
+    let request = try XCTUnwrap(message.message as? AllExportedMacrosAndValuesRequest)
     guard case .components(let level, let decodedParameters) = request.context else {
-      return XCTFail("Expected component-scoped macro evaluation")
+      return XCTFail("Expected component-scoped exported-settings request")
     }
     guard case .target(let guid) = level else {
-      return XCTFail("Expected target-scoped macro evaluation")
-    }
-    guard case .stringExpressionArray(let decodedExpressions) = request.request else {
-      return XCTFail("Expected one expression-array request")
+      return XCTFail("Expected target-scoped exported-settings request")
     }
 
     XCTAssertEqual(request.sessionHandle, "SESSION-1")
     XCTAssertEqual(guid, "TARGET-B")
     XCTAssertEqual(decodedParameters, parameters)
-    XCTAssertEqual(decodedExpressions, expressions)
-    XCTAssertNil(request.overrides)
-    XCTAssertEqual(request.resultType, .stringList)
   }
 
-  func testStringListMacroCodecPreservesTypeAndEffectiveParameters() throws {
-    let parameters = makeBuildParameters(action: "install", configuration: "Release")
-
-    let payload = SwiftBuildProtocolCodec.encodeStringListMacroEvaluationRequest(
-      sessionHandle: "SESSION-1",
-      targetGUID: "TARGET-B",
-      buildParameters: parameters,
-      macroName: "TOOLCHAINS"
-    )
-    let message = try SwiftBuildProtocolCodec.decodeIPCMessage(payload)
-    let request = try XCTUnwrap(message.message as? MacroEvaluationRequest)
-    guard case .components(let level, let decodedParameters) = request.context else {
-      return XCTFail("Expected component-scoped macro evaluation")
-    }
-    guard case .target(let guid) = level else {
-      return XCTFail("Expected target-scoped macro evaluation")
-    }
-    guard case .macro(let macroName) = request.request else {
-      return XCTFail("Expected a declared macro request")
-    }
-
-    XCTAssertEqual(request.sessionHandle, "SESSION-1")
-    XCTAssertEqual(guid, "TARGET-B")
-    XCTAssertEqual(decodedParameters, parameters)
-    XCTAssertEqual(macroName, "TOOLCHAINS")
-    XCTAssertNil(request.overrides)
-    XCTAssertEqual(request.resultType, .stringList)
-  }
-
-  func testAcceptedXcode17F42MacroEvaluationCompatibilityFixtures() throws {
+  func testPinnedSwiftBuildExportedSettingsCompatibilityFixtures() throws {
+    // These fixtures are rendered from the public request/response products at
+    // Swift Build e4f6fc77, not captured from a private Xcode implementation.
     let requestBase64 =
-      "uE1BQ1JPX0VWQUxVQVRJT05fUkVRVUVTVMUBjHsiY29udGV4dCI6eyJjb21wb25lbnRzIjp7ImJ1aWxkUGFyYW1ldGVycyI6eyJhY3Rpb24iOiJpbnN0YWxsIiwiYWN0aXZlQXJjaGl0ZWN0dXJlIjoiYXJtNjQiLCJjb25maWd1cmF0aW9uIjoiUmVsZWFzZSIsIm92ZXJyaWRlcyI6eyJjb21tYW5kTGluZSI6e30sImNvbW1hbmRMaW5lQ29uZmlnIjp7fSwiZW52aXJvbm1lbnRDb25maWciOnt9LCJzeW50aGVzaXplZCI6e319fSwibGV2ZWwiOnsidGFyZ2V0Ijp7Il8wIjoiVEFSR0VULUIifX19fSwicmVxdWVzdCI6eyJzdHJpbmdFeHByZXNzaW9uQXJyYXkiOnsiXzAiOlsiJChCQVpFTF9MQUJFTCkiLCIkKFRBUkdFVF9CVUlMRF9ESVIpIl19fSwicmVzdWx0VHlwZSI6eyJzdHJpbmdMaXN0Ijp7fX0sInNlc3Npb25IYW5kbGUiOiJTRVNTSU9OLTEifQ=="
-    let listMacroRequestBase64 =
-      "uE1BQ1JPX0VWQUxVQVRJT05fUkVRVUVTVMUBYHsiY29udGV4dCI6eyJjb21wb25lbnRzIjp7ImJ1aWxkUGFyYW1ldGVycyI6eyJhY3Rpb24iOiJpbnN0YWxsIiwiYWN0aXZlQXJjaGl0ZWN0dXJlIjoiYXJtNjQiLCJjb25maWd1cmF0aW9uIjoiUmVsZWFzZSIsIm92ZXJyaWRlcyI6eyJjb21tYW5kTGluZSI6e30sImNvbW1hbmRMaW5lQ29uZmlnIjp7fSwiZW52aXJvbm1lbnRDb25maWciOnt9LCJzeW50aGVzaXplZCI6e319fSwibGV2ZWwiOnsidGFyZ2V0Ijp7Il8wIjoiVEFSR0VULUIifX19fSwicmVxdWVzdCI6eyJtYWNybyI6eyJfMCI6IlRPT0xDSEFJTlMifX0sInJlc3VsdFR5cGUiOnsic3RyaW5nTGlzdCI6e319LCJzZXNzaW9uSGFuZGxlIjoiU0VTU0lPTi0xIn0="
+      "2SZBTExfRVhQT1JURURfTUFDUk9TX0FORF9WQUxVRVNfUkVRVUVTVMUBGXsiY29udGV4dCI6eyJjb21wb25lbnRzIjp7ImJ1aWxkUGFyYW1ldGVycyI6eyJhY3Rpb24iOiJpbnN0YWxsIiwiYWN0aXZlQXJjaGl0ZWN0dXJlIjoiYXJtNjQiLCJjb25maWd1cmF0aW9uIjoiUmVsZWFzZSIsIm92ZXJyaWRlcyI6eyJjb21tYW5kTGluZSI6e30sImNvbW1hbmRMaW5lQ29uZmlnIjp7fSwiZW52aXJvbm1lbnRDb25maWciOnt9LCJzeW50aGVzaXplZCI6e319fSwibGV2ZWwiOnsidGFyZ2V0Ijp7Il8wIjoiVEFSR0VULUIifX19fSwic2Vzc2lvbkhhbmRsZSI6IlNFU1NJT04tMSJ9"
     let responseBase64 =
-      "uU1BQ1JPX0VWQUxVQVRJT05fUkVTUE9OU0XENnsicmVzdWx0Ijp7InN0cmluZ0xpc3QiOnsiXzAiOlsidmFsdWUtYSIsInZhbHVlLWIiXX19fQ=="
+      "2SdBTExfRVhQT1JURURfTUFDUk9TX0FORF9WQUxVRVNfUkVTUE9OU0XEVHsicmVzdWx0Ijp7IkJBWkVMX0xBQkVMIjoibGFiZWwiLCJUT09MQ0hBSU5TIjoibWV0YWwgZGVmYXVsdCIsIlVOUkVMQVRFRCI6InNlY3JldCJ9fQ=="
     let requestFixture = try XCTUnwrap(Data(base64Encoded: requestBase64))
-    let listMacroRequestFixture = try XCTUnwrap(Data(base64Encoded: listMacroRequestBase64))
     let responseFixture = try XCTUnwrap(Data(base64Encoded: responseBase64))
 
+    XCTAssertEqual(requestFixture.count, 324)
     XCTAssertEqual(
-      sha256(requestFixture), "7c2c88341544b80107da035a84ef97fe59ff8e5765ee1a44086e5a92c2d51eb1")
+      sha256(requestFixture), "28487bfc977efd427c2460e04c2699bba9e62d92179c0ed6ef290e5583054d4b")
+    XCTAssertEqual(responseFixture.count, 127)
     XCTAssertEqual(
-      sha256(responseFixture),
-      "9c6b0271fedc02b7b9be33a3af9595b2112316cb17296d345f5fe914bd67ef00")
-    XCTAssertEqual(
-      sha256(listMacroRequestFixture),
-      "12ade669bd0efcd35dfd73b31c6e0d756121a75c1e2fdc98286cba2e26e5f5a6")
+      sha256(responseFixture), "e682c9c02dca4e1a34b03034a56e6a160fc348c6765c2628282073c61f2f0656")
 
-    let requestIPC = try SwiftBuildProtocolCodec.decodeIPCMessage(Array(requestFixture))
-    let request = try XCTUnwrap(requestIPC.message as? MacroEvaluationRequest)
-    guard case .components(let level, let parameters) = request.context,
-      case .target(let targetGUID) = level,
-      case .stringExpressionArray(let expressions) = request.request
-    else {
-      return XCTFail("Expected target-scoped expression-array fixture")
+    let requestMessage = try SwiftBuildProtocolCodec.decodeIPCMessage(Array(requestFixture))
+    let request = try XCTUnwrap(requestMessage.message as? AllExportedMacrosAndValuesRequest)
+    guard case .components(let level, let parameters) = request.context else {
+      return XCTFail("Expected component-scoped exported-settings fixture")
+    }
+    guard case .target(let guid) = level else {
+      return XCTFail("Expected target-scoped exported-settings fixture")
     }
     XCTAssertEqual(request.sessionHandle, "SESSION-1")
-    XCTAssertEqual(targetGUID, "TARGET-B")
+    XCTAssertEqual(guid, "TARGET-B")
     XCTAssertEqual(parameters.action, "install")
     XCTAssertEqual(parameters.configuration, "Release")
-    XCTAssertEqual(expressions, ["$(BAZEL_LABEL)", "$(TARGET_BUILD_DIR)"])
     XCTAssertEqual(SwiftBuildProtocolCodec.encode(request), Array(requestFixture))
 
-    let listRequestIPC = try SwiftBuildProtocolCodec.decodeIPCMessage(
-      Array(listMacroRequestFixture)
+    let selected = try SwiftBuildProtocolCodec.decodeAllExportedMacrosAndValuesResponse(
+      Array(responseFixture),
+      selecting: ["BAZEL_LABEL", "TOOLCHAINS", "MISSING"]
     )
-    let listRequest = try XCTUnwrap(listRequestIPC.message as? MacroEvaluationRequest)
-    guard case .macro(let listMacroName) = listRequest.request else {
-      return XCTFail("Expected declared list-macro fixture")
-    }
-    XCTAssertEqual(listMacroName, "TOOLCHAINS")
-    XCTAssertEqual(listRequest.resultType, .stringList)
-    XCTAssertEqual(
-      SwiftBuildProtocolCodec.encode(listRequest),
-      Array(listMacroRequestFixture)
-    )
+    XCTAssertEqual(selected, ["label", "metal default", ""])
+    XCTAssertFalse(selected.contains("secret"))
 
-    let values = try SwiftBuildProtocolCodec.decodeMacroEvaluationResponse(
-      Array(responseFixture)
-    )
-    XCTAssertEqual(values, ["value-a", "value-b"])
-    XCTAssertEqual(
-      SwiftBuildProtocolCodec.encode(
-        MacroEvaluationResponse(result: .stringList(values))
-      ),
-      Array(responseFixture)
-    )
+    let responseMessage = try SwiftBuildProtocolCodec.decodeIPCMessage(Array(responseFixture))
+    let response = try XCTUnwrap(responseMessage.message as? AllExportedMacrosAndValuesResponse)
+    XCTAssertEqual(SwiftBuildProtocolCodec.encode(response), Array(responseFixture))
   }
 
-  func testMacroEvaluationResponseRejectsNonListShape() {
+  func testExportedSettingsResponseProjectsAllowlistAndRepresentsMissingAsEmpty() throws {
     let payload = SwiftBuildProtocolCodec.encode(
-      MacroEvaluationResponse(result: .string("wrong-shape"))
+      AllExportedMacrosAndValuesResponse(
+        result: [
+          "REQUESTED": "requested-value",
+          "UNRELATED_SECRET": "must-not-cross-boundary",
+        ]
+      )
     )
 
-    XCTAssertThrowsError(try SwiftBuildProtocolCodec.decodeMacroEvaluationResponse(payload)) {
+    let selected = try SwiftBuildProtocolCodec.decodeAllExportedMacrosAndValuesResponse(
+      payload,
+      selecting: ["REQUESTED", "MISSING"]
+    )
+
+    XCTAssertEqual(selected, ["requested-value", ""])
+    XCTAssertFalse(selected.contains("must-not-cross-boundary"))
+  }
+
+  func testExportedSettingsResponseRejectsWrongMessageShape() {
+    let payload = SwiftBuildProtocolCodec.encode(BoolResponse(true))
+
+    XCTAssertThrowsError(
+      try SwiftBuildProtocolCodec.decodeAllExportedMacrosAndValuesResponse(
+        payload,
+        selecting: ["REQUESTED"]
+      )
+    ) {
       XCTAssertEqual(
         $0 as? SwiftBuildProtocolCodecError,
-        .unexpectedMacroEvaluationResult
+        .unexpectedMessage(
+          expected: AllExportedMacrosAndValuesResponse.name,
+          actual: BoolResponse.name
+        )
       )
     }
   }

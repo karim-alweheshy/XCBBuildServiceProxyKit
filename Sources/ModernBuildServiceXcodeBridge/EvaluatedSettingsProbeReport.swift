@@ -12,11 +12,11 @@ public enum EvaluatedSettingsProbeFailureCode: String, Codable, Sendable {
   case capturedPayloadTooLarge = "captured_payload_too_large"
   case createBuildDecodeFailed = "create_build_decode_failed"
   case invalidManifest = "invalid_manifest"
+  case missingRequiredPlanRole = "missing_required_plan_role"
   case multiTargetSharedValueDisagreement = "multi_target_shared_value_disagreement"
   case noConfiguredTargets = "no_configured_targets"
   case previewStateDisagreement = "preview_state_disagreement"
   case requestSendFailed = "request_send_failed"
-  case responseCountMismatch = "response_count_mismatch"
   case responseDecodeFailed = "response_decode_failed"
   case responseShapeMismatch = "response_shape_mismatch"
   case timeout

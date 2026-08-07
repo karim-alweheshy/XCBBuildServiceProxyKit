@@ -7,7 +7,7 @@ import XCTest
 @testable import ModernBuildServiceXcodeBridge
 
 final class EvaluatedSettingsProbeTests: XCTestCase {
-  func testProbeUsesHeldChannelAndForwardsOriginalBytesAfterRedactedSuccess() throws {
+  func testProbeUsesOneExportedSettingsRequestAndForwardsOriginalAfterRedactedSuccess() throws {
     let fixture = try ProbeFixture(environmentKeys: ["CUSTOM_SECRET", "HOME"])
     defer { fixture.remove() }
     let probe = try fixture.makeProbe()
@@ -19,29 +19,27 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       payload: SwiftBuildProtocolCodec.encode(request)
     )
     var serviceBoundFrames: [BuildServiceRawFrame] = []
-    let keys = EvaluatedSettingsProbe.fixedPlanRoleKeys + ["CUSTOM_SECRET", "HOME"]
-    let secretValues = makeValues(keys: keys, overrides: ["CUSTOM_SECRET": "private-value"])
+    let secretValue = "private-value"
+    let unknownValue = "unrelated-private-value"
 
     let consumed = try probe.intercept(
       direction: .clientToService,
       frame: original,
       send: { frame in
         serviceBoundFrames.append(frame)
-        let macroRequest = try decodeMacroRequest(frame)
+        let exportedRequest = try decodeExportedSettingsRequest(frame)
         XCTAssertEqual(frame.channel, original.channel)
-        XCTAssertEqual(macroRequest.targetGUID, "TARGET-A")
-        XCTAssertEqual(macroRequest.expressions, keys.map { "$(\($0))" })
-
-        let response = BuildServiceRawFrame(
-          channel: frame.channel,
-          payload: SwiftBuildProtocolCodec.encode(
-            MacroEvaluationResponse(result: .stringList(secretValues))
-          ),
-          messageName: MacroEvaluationResponse.name
+        XCTAssertEqual(exportedRequest.targetGUID, "TARGET-A")
+        XCTAssertEqual(exportedRequest.parameters, request.request.parameters)
+        var environment = makeExportedEnvironment(
+          overrides: [
+            "CUSTOM_SECRET": secretValue,
+            "HOME": "/private/home",
+          ]
         )
-        XCTAssertTrue(
-          try probe.intercept(direction: .serviceToClient, frame: response, send: { _ in })
-        )
+        environment["UNRELATED_SECRET"] = unknownValue
+        try respond(to: frame, with: environment, probe: probe)
+        environment.removeAll(keepingCapacity: false)
       }
     )
     XCTAssertFalse(consumed)
@@ -56,15 +54,21 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     XCTAssertEqual(report.failureCodes, [])
     XCTAssertEqual(report.targetCount, 1)
     XCTAssertEqual(report.targets.count, 1)
+    XCTAssertEqual(
+      report.targets[0].settings.map(\.key),
+      EvaluatedSettingsProbe.fixedPlanRoleKeys + ["CUSTOM_SECRET", "HOME"]
+    )
+    XCTAssertFalse(report.targets[0].settings.contains { $0.key == "UNRELATED_SECRET" })
     let secretMetadata = try XCTUnwrap(
       report.targets[0].settings.first { $0.key == "CUSTOM_SECRET" }
     )
     XCTAssertTrue(secretMetadata.present)
-    XCTAssertEqual(secretMetadata.valueByteLength, 13)
-    XCTAssertEqual(secretMetadata.valueSHA256, sha256("private-value"))
+    XCTAssertEqual(secretMetadata.valueByteLength, secretValue.utf8.count)
+    XCTAssertEqual(secretMetadata.valueSHA256, sha256(secretValue))
 
     let reportText = try String(contentsOf: fixture.reportURL, encoding: .utf8)
-    XCTAssertFalse(reportText.contains("private-value"))
+    XCTAssertFalse(reportText.contains(secretValue))
+    XCTAssertFalse(reportText.contains(unknownValue))
     XCTAssertFalse(reportText.contains("SESSION-1"))
     XCTAssertFalse(reportText.contains("TARGET-A"))
     let attributes = try FileManager.default.attributesOfItem(atPath: fixture.reportURL.path)
@@ -72,8 +76,8 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     XCTAssertEqual(permissions & 0o777, 0o600)
   }
 
-  func testToolchainsUsesDedicatedOrderedStringListAndCanonicalizesForReport() throws {
-    let fixture = try ProbeFixture(environmentKeys: ["BEFORE", "TOOLCHAINS", "AFTER"])
+  func testMissingOptionalManifestEnvironmentIsRepresentedAsAbsent() throws {
+    let fixture = try ProbeFixture(environmentKeys: ["OPTIONAL_MISSING"])
     defer { fixture.remove() }
     let probe = try fixture.makeProbe()
     let request = makeCreateBuildRequest(
@@ -83,60 +87,29 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       channel: 15,
       payload: SwiftBuildProtocolCodec.encode(request)
     )
-    let scalarKeys = EvaluatedSettingsProbe.fixedPlanRoleKeys + ["BEFORE", "AFTER"]
-    let listValues = ["toolchain-metal", "toolchain-default"]
-    var serviceBoundFrames: [BuildServiceRawFrame] = []
 
-    let consumed = try probe.intercept(
-      direction: .clientToService,
-      frame: original,
-      send: { frame in
-        serviceBoundFrames.append(frame)
-        switch serviceBoundFrames.count {
-        case 1:
-          let scalarRequest = try decodeMacroRequest(frame)
-          XCTAssertEqual(scalarRequest.expressions, scalarKeys.map { "$(\($0))" })
-          XCTAssertFalse(scalarRequest.expressions.contains("$(TOOLCHAINS)"))
-          try respond(
-            to: frame,
-            with: .stringList(makeValues(keys: scalarKeys)),
-            probe: probe
-          )
-        case 2:
-          let listRequest = try decodeStringListMacroRequest(frame)
-          XCTAssertEqual(listRequest.targetGUID, "TARGET-A")
-          XCTAssertEqual(listRequest.parameters, request.request.parameters)
-          XCTAssertEqual(listRequest.macroName, "TOOLCHAINS")
-          try respond(to: frame, with: .stringList(listValues), probe: probe)
-        default:
-          XCTFail("Unexpected extra probe request")
+    XCTAssertFalse(
+      try probe.intercept(
+        direction: .clientToService,
+        frame: original,
+        send: { frame in
+          try respond(to: frame, with: makeExportedEnvironment(), probe: probe)
         }
-      }
+      )
     )
 
-    XCTAssertFalse(consumed)
-    XCTAssertEqual(serviceBoundFrames.count, 2)
-    XCTAssertTrue(serviceBoundFrames.allSatisfy { $0.channel == original.channel })
     let report = try fixture.readReport()
     XCTAssertEqual(report.status, .succeeded)
-    XCTAssertEqual(
-      report.targets[0].settings.map(\.key),
-      EvaluatedSettingsProbe.fixedPlanRoleKeys + ["BEFORE", "TOOLCHAINS", "AFTER"]
-    )
     let metadata = try XCTUnwrap(
-      report.targets[0].settings.first { $0.key == "TOOLCHAINS" }
+      report.targets[0].settings.first { $0.key == "OPTIONAL_MISSING" }
     )
-    let canonicalValue = listValues.joined(separator: " ")
-    XCTAssertTrue(metadata.present)
-    XCTAssertEqual(metadata.valueByteLength, canonicalValue.utf8.count)
-    XCTAssertEqual(metadata.valueSHA256, sha256(canonicalValue))
-    let reportText = try String(contentsOf: fixture.reportURL, encoding: .utf8)
-    XCTAssertFalse(reportText.contains(listValues[0]))
-    XCTAssertFalse(reportText.contains(listValues[1]))
+    XCTAssertFalse(metadata.present)
+    XCTAssertEqual(metadata.valueByteLength, 0)
+    XCTAssertEqual(metadata.valueSHA256, sha256(""))
   }
 
-  func testEmptyToolchainsListCanonicalizesToAbsentEmptyString() throws {
-    let fixture = try ProbeFixture(environmentKeys: ["TOOLCHAINS"])
+  func testMissingRequiredPlanRoleFailsProbeButForwardsCreate() throws {
+    let fixture = try ProbeFixture(environmentKeys: [])
     defer { fixture.remove() }
     let probe = try fixture.makeProbe()
     let request = makeCreateBuildRequest(
@@ -146,278 +119,29 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       channel: 16,
       payload: SwiftBuildProtocolCodec.encode(request)
     )
-    var requestCount = 0
 
-    XCTAssertFalse(
-      try probe.intercept(
-        direction: .clientToService,
-        frame: original,
-        send: { frame in
-          requestCount += 1
-          if requestCount == 1 {
-            try respond(
-              to: frame,
-              with: .stringList(
-                makeValues(keys: EvaluatedSettingsProbe.fixedPlanRoleKeys)
-              ),
-              probe: probe
-            )
-          } else {
-            XCTAssertEqual(try decodeStringListMacroRequest(frame).macroName, "TOOLCHAINS")
-            try respond(to: frame, with: .stringList([]), probe: probe)
-          }
-        }
-      )
+    let consumed = try probe.intercept(
+      direction: .clientToService,
+      frame: original,
+      send: { frame in
+        try respond(
+          to: frame,
+          with: makeExportedEnvironment(omitting: ["BAZEL_OUT"]),
+          probe: probe
+        )
+      }
     )
 
-    XCTAssertEqual(requestCount, 2)
+    XCTAssertFalse(consumed)
+    let report = try fixture.readReport()
+    XCTAssertEqual(report.status, .failed)
+    XCTAssertEqual(report.failureCodes, [.missingRequiredPlanRole])
     let metadata = try XCTUnwrap(
-      fixture.readReport().targets[0].settings.first { $0.key == "TOOLCHAINS" }
+      report.targets[0].settings.first { $0.key == "BAZEL_OUT" }
     )
     XCTAssertFalse(metadata.present)
     XCTAssertEqual(metadata.valueByteLength, 0)
     XCTAssertEqual(metadata.valueSHA256, sha256(""))
-  }
-
-  func testToolchainsListDisagreementAcrossTargetsFailsSharedValueControl() throws {
-    let fixture = try ProbeFixture(environmentKeys: ["TOOLCHAINS"])
-    defer { fixture.remove() }
-    let probe = try fixture.makeProbe()
-    let request = makeCreateBuildRequest(
-      targets: [
-        ConfiguredTargetMessagePayload(guid: "TARGET-A", parameters: nil),
-        ConfiguredTargetMessagePayload(guid: "TARGET-B", parameters: nil),
-      ]
-    )
-    let original = BuildServiceRawFrame(
-      channel: 22,
-      payload: SwiftBuildProtocolCodec.encode(request)
-    )
-    var requestCount = 0
-
-    let consumed = try probe.intercept(
-      direction: .clientToService,
-      frame: original,
-      send: { frame in
-        let targetIndex = requestCount / 2
-        requestCount += 1
-        if requestCount % 2 == 1 {
-          let scalarRequest = try decodeMacroRequest(frame)
-          XCTAssertEqual(scalarRequest.targetGUID, "TARGET-\(targetIndex == 0 ? "A" : "B")")
-          try respond(
-            to: frame,
-            with: .stringList(makeValues(keys: EvaluatedSettingsProbe.fixedPlanRoleKeys)),
-            probe: probe
-          )
-        } else {
-          let listRequest = try decodeStringListMacroRequest(frame)
-          XCTAssertEqual(listRequest.macroName, "TOOLCHAINS")
-          try respond(
-            to: frame,
-            with: .stringList(["common", targetIndex == 0 ? "first" : "second"]),
-            probe: probe
-          )
-        }
-      }
-    )
-
-    XCTAssertFalse(consumed)
-    XCTAssertEqual(requestCount, 4)
-    let report = try fixture.readReport()
-    XCTAssertEqual(report.failureCodes, [.multiTargetSharedValueDisagreement])
-    XCTAssertEqual(report.targets.count, 2)
-  }
-
-  func testToolchainsScalarResponseFailsShapeAndForwardsCreate() throws {
-    let fixture = try ProbeFixture(environmentKeys: ["TOOLCHAINS"])
-    defer { fixture.remove() }
-    let probe = try fixture.makeProbe()
-    let request = makeCreateBuildRequest(
-      targets: [ConfiguredTargetMessagePayload(guid: "TARGET-A", parameters: nil)]
-    )
-    let original = BuildServiceRawFrame(
-      channel: 17,
-      payload: SwiftBuildProtocolCodec.encode(request)
-    )
-    var requestCount = 0
-
-    let consumed = try probe.intercept(
-      direction: .clientToService,
-      frame: original,
-      send: { frame in
-        requestCount += 1
-        if requestCount == 1 {
-          try respond(
-            to: frame,
-            with: .stringList(makeValues(keys: EvaluatedSettingsProbe.fixedPlanRoleKeys)),
-            probe: probe
-          )
-        } else {
-          XCTAssertEqual(try decodeStringListMacroRequest(frame).macroName, "TOOLCHAINS")
-          try respond(to: frame, with: .string("wrong-shape"), probe: probe)
-        }
-      }
-    )
-
-    XCTAssertFalse(consumed)
-    XCTAssertEqual(requestCount, 2)
-    XCTAssertEqual(try fixture.readReport().failureCodes, [.responseShapeMismatch])
-  }
-
-  func testMalformedToolchainsResponseFailsDecodeAndForwardsCreate() throws {
-    let fixture = try ProbeFixture(environmentKeys: ["TOOLCHAINS"])
-    defer { fixture.remove() }
-    let probe = try fixture.makeProbe()
-    let request = makeCreateBuildRequest(
-      targets: [ConfiguredTargetMessagePayload(guid: "TARGET-A", parameters: nil)]
-    )
-    let original = BuildServiceRawFrame(
-      channel: 21,
-      payload: SwiftBuildProtocolCodec.encode(request)
-    )
-    var requestCount = 0
-
-    let consumed = try probe.intercept(
-      direction: .clientToService,
-      frame: original,
-      send: { frame in
-        requestCount += 1
-        if requestCount == 1 {
-          try respond(
-            to: frame,
-            with: .stringList(makeValues(keys: EvaluatedSettingsProbe.fixedPlanRoleKeys)),
-            probe: probe
-          )
-        } else {
-          XCTAssertEqual(try decodeStringListMacroRequest(frame).macroName, "TOOLCHAINS")
-          let malformed = BuildServiceRawFrame(
-            channel: frame.channel,
-            payload: [0xC1],
-            messageName: MacroEvaluationResponse.name
-          )
-          XCTAssertTrue(
-            try probe.intercept(
-              direction: .serviceToClient,
-              frame: malformed,
-              send: { _ in }
-            )
-          )
-        }
-      }
-    )
-
-    XCTAssertFalse(consumed)
-    XCTAssertEqual(requestCount, 2)
-    XCTAssertEqual(try fixture.readReport().failureCodes, [.responseDecodeFailed])
-  }
-
-  func testUnexpectedTrafficDuringToolchainsQueryIsConsumedAndFailsProbe() throws {
-    let fixture = try ProbeFixture(environmentKeys: ["TOOLCHAINS"])
-    defer { fixture.remove() }
-    let probe = try fixture.makeProbe()
-    let request = makeCreateBuildRequest(
-      targets: [ConfiguredTargetMessagePayload(guid: "TARGET-A", parameters: nil)]
-    )
-    let original = BuildServiceRawFrame(
-      channel: 18,
-      payload: SwiftBuildProtocolCodec.encode(request)
-    )
-    var requestCount = 0
-
-    let consumed = try probe.intercept(
-      direction: .clientToService,
-      frame: original,
-      send: { frame in
-        requestCount += 1
-        if requestCount == 1 {
-          try respond(
-            to: frame,
-            with: .stringList(makeValues(keys: EvaluatedSettingsProbe.fixedPlanRoleKeys)),
-            probe: probe
-          )
-        } else {
-          XCTAssertEqual(try decodeStringListMacroRequest(frame).macroName, "TOOLCHAINS")
-          let unexpected = BuildServiceRawFrame(
-            channel: frame.channel,
-            payload: SwiftBuildProtocolCodec.encode(BoolResponse(true)),
-            messageName: BoolResponse.name
-          )
-          XCTAssertTrue(
-            try probe.intercept(
-              direction: .serviceToClient,
-              frame: unexpected,
-              send: { _ in }
-            )
-          )
-        }
-      }
-    )
-
-    XCTAssertFalse(consumed)
-    XCTAssertEqual(requestCount, 2)
-    XCTAssertEqual(
-      try fixture.readReport().failureCodes,
-      [.unexpectedSameChannelTraffic]
-    )
-  }
-
-  func testToolchainsTimeoutForwardsCreateAndConsumesLateListResponse() throws {
-    let fixture = try ProbeFixture(environmentKeys: ["TOOLCHAINS"])
-    defer { fixture.remove() }
-    let probe = try fixture.makeProbe(timeout: 0.001)
-    let request = makeCreateBuildRequest(
-      targets: [ConfiguredTargetMessagePayload(guid: "TARGET-A", parameters: nil)]
-    )
-    let original = BuildServiceRawFrame(
-      channel: 20,
-      payload: SwiftBuildProtocolCodec.encode(request)
-    )
-    var requestCount = 0
-    var listRequestFrame: BuildServiceRawFrame?
-
-    let consumed = try probe.intercept(
-      direction: .clientToService,
-      frame: original,
-      send: { frame in
-        requestCount += 1
-        if requestCount == 1 {
-          try respond(
-            to: frame,
-            with: .stringList(makeValues(keys: EvaluatedSettingsProbe.fixedPlanRoleKeys)),
-            probe: probe
-          )
-        } else {
-          XCTAssertEqual(try decodeStringListMacroRequest(frame).macroName, "TOOLCHAINS")
-          listRequestFrame = frame
-        }
-      }
-    )
-
-    XCTAssertFalse(consumed)
-    XCTAssertEqual(requestCount, 2)
-    XCTAssertEqual(try fixture.readReport().failureCodes, [.timeout])
-    let lateResponse = BuildServiceRawFrame(
-      channel: try XCTUnwrap(listRequestFrame).channel,
-      payload: SwiftBuildProtocolCodec.encode(
-        MacroEvaluationResponse(result: .stringList(["late-toolchain"]))
-      ),
-      messageName: MacroEvaluationResponse.name
-    )
-    XCTAssertTrue(
-      try probe.intercept(
-        direction: .serviceToClient,
-        frame: lateResponse,
-        send: { _ in }
-      )
-    )
-    XCTAssertFalse(
-      probe.shouldIntercept(
-        direction: .serviceToClient,
-        channel: original.channel,
-        payloadLength: 1,
-        messageName: BoolResponse.name
-      )
-    )
   }
 
   func testEffectiveTargetParametersAndSharedDisagreementFailProbeButForwardCreate() throws {
@@ -435,7 +159,6 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       channel: 19,
       payload: SwiftBuildProtocolCodec.encode(request)
     )
-    let keys = EvaluatedSettingsProbe.fixedPlanRoleKeys + ["HOME"]
     var requestIndex = 0
     var decodedParameters: [BuildParametersMessagePayload] = []
 
@@ -443,10 +166,9 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       direction: .clientToService,
       frame: original,
       send: { frame in
-        let macroRequest = try decodeMacroRequest(frame)
-        decodedParameters.append(macroRequest.parameters)
-        var values = makeValues(
-          keys: keys,
+        let exportedRequest = try decodeExportedSettingsRequest(frame)
+        decodedParameters.append(exportedRequest.parameters)
+        let environment = makeExportedEnvironment(
           overrides: [
             "BAZEL_LABEL": "label-\(requestIndex)",
             "BAZEL_TARGET_ID": "id-\(requestIndex)",
@@ -457,21 +179,12 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
           ]
         )
         requestIndex += 1
-        let response = BuildServiceRawFrame(
-          channel: frame.channel,
-          payload: SwiftBuildProtocolCodec.encode(
-            MacroEvaluationResponse(result: .stringList(values))
-          ),
-          messageName: MacroEvaluationResponse.name
-        )
-        XCTAssertTrue(
-          try probe.intercept(direction: .serviceToClient, frame: response, send: { _ in })
-        )
-        values.removeAll(keepingCapacity: false)
+        try respond(to: frame, with: environment, probe: probe)
       }
     )
 
     XCTAssertFalse(consumed)
+    XCTAssertEqual(requestIndex, 2)
     XCTAssertEqual(decodedParameters, [request.request.parameters, targetOverride])
     let report = try fixture.readReport()
     XCTAssertEqual(report.status, .failed)
@@ -492,23 +205,15 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       channel: 23,
       payload: SwiftBuildProtocolCodec.encode(request)
     )
-    let keys = EvaluatedSettingsProbe.fixedPlanRoleKeys
 
     let consumed = try probe.intercept(
       direction: .clientToService,
       frame: original,
       send: { frame in
-        let response = BuildServiceRawFrame(
-          channel: frame.channel,
-          payload: SwiftBuildProtocolCodec.encode(
-            MacroEvaluationResponse(
-              result: .stringList(makeValues(keys: keys, overrides: ["ENABLE_PREVIEWS": "NO"]))
-            )
-          ),
-          messageName: MacroEvaluationResponse.name
-        )
-        XCTAssertTrue(
-          try probe.intercept(direction: .serviceToClient, frame: response, send: { _ in })
+        try respond(
+          to: frame,
+          with: makeExportedEnvironment(overrides: ["ENABLE_PREVIEWS": "NO"]),
+          probe: probe
         )
       }
     )
@@ -519,7 +224,7 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     XCTAssertEqual(report.failureCodes, [.previewStateDisagreement])
   }
 
-  func testResponseCountMismatchFailsProbeAndForwardsCreate() throws {
+  func testMalformedExportedSettingsResponseFailsProbeAndForwardsCreate() throws {
     let fixture = try ProbeFixture(environmentKeys: [])
     defer { fixture.remove() }
     let probe = try fixture.makeProbe()
@@ -535,24 +240,26 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       direction: .clientToService,
       frame: original,
       send: { frame in
-        let response = BuildServiceRawFrame(
+        let malformed = BuildServiceRawFrame(
           channel: frame.channel,
-          payload: SwiftBuildProtocolCodec.encode(
-            MacroEvaluationResponse(result: .stringList(["too-short"]))
-          ),
-          messageName: MacroEvaluationResponse.name
+          payload: [0xC1],
+          messageName: AllExportedMacrosAndValuesResponse.name
         )
         XCTAssertTrue(
-          try probe.intercept(direction: .serviceToClient, frame: response, send: { _ in })
+          try probe.intercept(
+            direction: .serviceToClient,
+            frame: malformed,
+            send: { _ in }
+          )
         )
       }
     )
 
     XCTAssertFalse(consumed)
-    XCTAssertEqual(try fixture.readReport().failureCodes, [.responseCountMismatch])
+    XCTAssertEqual(try fixture.readReport().failureCodes, [.responseDecodeFailed])
   }
 
-  func testResponseShapeMismatchFailsProbeAndForwardsCreate() throws {
+  func testServiceErrorResponseFailsShapeAndForwardsCreate() throws {
     let fixture = try ProbeFixture(environmentKeys: [])
     defer { fixture.remove() }
     let probe = try fixture.makeProbe()
@@ -568,21 +275,25 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
       direction: .clientToService,
       frame: original,
       send: { frame in
-        let response = BuildServiceRawFrame(
+        let errorResponse = BuildServiceRawFrame(
           channel: frame.channel,
-          payload: SwiftBuildProtocolCodec.encode(
-            MacroEvaluationResponse(result: .string("wrong-shape"))
-          ),
-          messageName: MacroEvaluationResponse.name
+          payload: SwiftBuildProtocolCodec.encode(ErrorResponse("synthetic-error")),
+          messageName: ErrorResponse.name
         )
         XCTAssertTrue(
-          try probe.intercept(direction: .serviceToClient, frame: response, send: { _ in })
+          try probe.intercept(
+            direction: .serviceToClient,
+            frame: errorResponse,
+            send: { _ in }
+          )
         )
       }
     )
 
     XCTAssertFalse(consumed)
     XCTAssertEqual(try fixture.readReport().failureCodes, [.responseShapeMismatch])
+    let reportText = try String(contentsOf: fixture.reportURL, encoding: .utf8)
+    XCTAssertFalse(reportText.contains("synthetic-error"))
   }
 
   func testTimeoutForwardsCreateAndConsumesLateMatchingResponse() throws {
@@ -609,18 +320,16 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     let lateResponse = BuildServiceRawFrame(
       channel: try XCTUnwrap(injectedFrame).channel,
       payload: SwiftBuildProtocolCodec.encode(
-        MacroEvaluationResponse(
-          result: .stringList(makeValues(keys: EvaluatedSettingsProbe.fixedPlanRoleKeys))
-        )
+        AllExportedMacrosAndValuesResponse(result: makeExportedEnvironment())
       ),
-      messageName: MacroEvaluationResponse.name
+      messageName: AllExportedMacrosAndValuesResponse.name
     )
     XCTAssertTrue(
       probe.shouldIntercept(
         direction: .serviceToClient,
         channel: lateResponse.channel,
         payloadLength: UInt32(lateResponse.payload.count),
-        messageName: MacroEvaluationResponse.name
+        messageName: AllExportedMacrosAndValuesResponse.name
       )
     )
     XCTAssertTrue(
@@ -628,7 +337,7 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
     )
   }
 
-  func testUnexpectedSameChannelTrafficIsDetectedAndConsumed() throws {
+  func testUnexpectedSameChannelTrafficIsDetectedConsumedAndRedacted() throws {
     let fixture = try ProbeFixture(environmentKeys: [])
     defer { fixture.remove() }
     let probe = try fixture.makeProbe()
@@ -785,74 +494,65 @@ final class EvaluatedSettingsProbeTests: XCTestCase {
   }
 }
 
-private struct DecodedMacroRequest {
+private struct DecodedExportedSettingsRequest {
   let targetGUID: String
   let parameters: BuildParametersMessagePayload
-  let expressions: [String]
 }
 
-private struct DecodedStringListMacroRequest {
-  let targetGUID: String
-  let parameters: BuildParametersMessagePayload
-  let macroName: String
-}
-
-private func decodeMacroRequest(_ frame: BuildServiceRawFrame) throws -> DecodedMacroRequest {
-  let ipcMessage = try SwiftBuildProtocolCodec.decodeIPCMessage(frame.payload)
-  let request = try XCTUnwrap(ipcMessage.message as? MacroEvaluationRequest)
-  guard case .components(let level, let parameters) = request.context,
-    case .target(let guid) = level,
-    case .stringExpressionArray(let expressions) = request.request
-  else {
-    throw SwiftBuildProtocolCodecError.unexpectedMacroEvaluationResult
-  }
-  return DecodedMacroRequest(
-    targetGUID: guid,
-    parameters: parameters,
-    expressions: expressions
-  )
-}
-
-private func decodeStringListMacroRequest(
+private func decodeExportedSettingsRequest(
   _ frame: BuildServiceRawFrame
-) throws -> DecodedStringListMacroRequest {
+) throws -> DecodedExportedSettingsRequest {
   let ipcMessage = try SwiftBuildProtocolCodec.decodeIPCMessage(frame.payload)
-  let request = try XCTUnwrap(ipcMessage.message as? MacroEvaluationRequest)
+  let request = try XCTUnwrap(
+    ipcMessage.message as? AllExportedMacrosAndValuesRequest
+  )
   guard case .components(let level, let parameters) = request.context,
-    case .target(let guid) = level,
-    case .macro(let macroName) = request.request,
-    request.resultType == .stringList
+    case .target(let guid) = level
   else {
-    throw SwiftBuildProtocolCodecError.unexpectedMacroEvaluationResult
+    throw SwiftBuildProtocolCodecError.unexpectedMessage(
+      expected: AllExportedMacrosAndValuesRequest.name,
+      actual: type(of: ipcMessage.message).name
+    )
   }
-  return DecodedStringListMacroRequest(
+  return DecodedExportedSettingsRequest(
     targetGUID: guid,
-    parameters: parameters,
-    macroName: macroName
+    parameters: parameters
   )
 }
 
 private func respond(
   to frame: BuildServiceRawFrame,
-  with result: MacroEvaluationResult,
+  with environment: [String: String],
   probe: EvaluatedSettingsProbe
 ) throws {
   let response = BuildServiceRawFrame(
     channel: frame.channel,
-    payload: SwiftBuildProtocolCodec.encode(MacroEvaluationResponse(result: result)),
-    messageName: MacroEvaluationResponse.name
+    payload: SwiftBuildProtocolCodec.encode(
+      AllExportedMacrosAndValuesResponse(result: environment)
+    ),
+    messageName: AllExportedMacrosAndValuesResponse.name
   )
   XCTAssertTrue(
     try probe.intercept(direction: .serviceToClient, frame: response, send: { _ in })
   )
 }
 
-private func makeValues(keys: [String], overrides: [String: String] = [:]) -> [String] {
-  keys.map { key in
-    if let value = overrides[key] { return value }
-    if key == "ENABLE_PREVIEWS" { return "NO" }
-    return "shared-\(key.lowercased())"
+private func makeExportedEnvironment(
+  overrides: [String: String] = [:],
+  omitting omittedKeys: Set<String> = []
+) -> [String: String] {
+  var environment = Dictionary(
+    uniqueKeysWithValues: EvaluatedSettingsProbe.fixedPlanRoleKeys.map { key in
+      (key, key == "ENABLE_PREVIEWS" ? "NO" : "value-\(key.lowercased())")
+    }
+  )
+  for (key, value) in overrides {
+    environment[key] = value
   }
+  for key in omittedKeys {
+    environment.removeValue(forKey: key)
+  }
+  return environment
 }
 
 private func sha256(_ value: String) -> String {
