@@ -1,0 +1,244 @@
+import Darwin
+import Foundation
+
+public enum OpaquePipeRelayError: LocalizedError {
+  case failedToCreateProcessGroup(pid_t)
+  case relayFailed(direction: String, underlying: String)
+
+  public var errorDescription: String? {
+    switch self {
+    case .failedToCreateProcessGroup(let pid):
+      return "The native build service process \(pid) did not start in an owned process group."
+    case .relayFailed(let direction, let underlying):
+      return "The \(direction) build-service relay failed: \(underlying)"
+    }
+  }
+}
+
+/// Relays the build-service byte stream without decoding or rewriting it.
+///
+/// Message boundaries remain encoded in the stream and are interpreted only by
+/// Xcode and its selected native service. This keeps unknown protocol messages
+/// and fields transparent.
+public final class OpaquePipeRelay {
+  public struct Summary: Equatable {
+    public let clientToServiceBytes: UInt64
+    public let serviceToClientBytes: UInt64
+    public let terminationStatus: Int32
+
+    public init(
+      clientToServiceBytes: UInt64,
+      serviceToClientBytes: UInt64,
+      terminationStatus: Int32
+    ) {
+      self.clientToServiceBytes = clientToServiceBytes
+      self.serviceToClientBytes = serviceToClientBytes
+      self.terminationStatus = terminationStatus
+    }
+  }
+
+  private let executableURL: URL
+  private let environment: [String: String]
+  private let input: FileHandle
+  private let output: FileHandle
+  private let errorOutput: FileHandle
+  private let terminationGrace: TimeInterval
+  private let lock = NSLock()
+  private var process: Process?
+  private var stopRequested = false
+
+  public init(
+    executableURL: URL,
+    environment: [String: String],
+    input: FileHandle = .standardInput,
+    output: FileHandle = .standardOutput,
+    errorOutput: FileHandle = .standardError,
+    terminationGrace: TimeInterval = 2
+  ) {
+    self.executableURL = executableURL
+    self.environment = environment
+    self.input = input
+    self.output = output
+    self.errorOutput = errorOutput
+    self.terminationGrace = terminationGrace
+  }
+
+  public func run(onProcessStarted: (() -> Void)? = nil) throws -> Summary {
+    let childInput = Pipe()
+    let childOutput = Pipe()
+    let child = Process()
+    child.executableURL = executableURL
+    child.currentDirectoryURL = executableURL.deletingLastPathComponent()
+    child.environment = environment
+    child.standardInput = childInput
+    child.standardOutput = childOutput
+    child.standardError = errorOutput
+
+    let startsNewProcessGroup = Selector(("setStartsNewProcessGroup:"))
+    guard child.responds(to: startsNewProcessGroup) else {
+      throw OpaquePipeRelayError.failedToCreateProcessGroup(0)
+    }
+    // Foundation exposes this Process control through Objective-C KVC on
+    // macOS. KVC is required because perform(_:with:) cannot correctly
+    // marshal the primitive BOOL argument.
+    child.setValue(true, forKey: "startsNewProcessGroup")
+
+    try child.run()
+    let childPID = child.processIdentifier
+    guard getpgid(childPID) == childPID else {
+      child.terminate()
+      throw OpaquePipeRelayError.failedToCreateProcessGroup(childPID)
+    }
+
+    lock.withLock {
+      process = child
+      if stopRequested {
+        signalOwnedProcessGroup(SIGTERM)
+      }
+    }
+    onProcessStarted?()
+
+    let copyGroup = DispatchGroup()
+    let countLock = NSLock()
+    var clientToServiceBytes: UInt64 = 0
+    var serviceToClientBytes: UInt64 = 0
+    var firstRelayError: OpaquePipeRelayError?
+
+    copyGroup.enter()
+    DispatchQueue.global(qos: .userInitiated).async {
+      defer {
+        try? childInput.fileHandleForWriting.close()
+        copyGroup.leave()
+      }
+      do {
+        let byteCount = try Self.copyBytes(from: self.input, to: childInput.fileHandleForWriting)
+        countLock.withLock { clientToServiceBytes = byteCount }
+      } catch {
+        countLock.withLock {
+          if firstRelayError == nil && !self.isStopRequested {
+            firstRelayError = .relayFailed(
+              direction: "client-to-service",
+              underlying: error.localizedDescription
+            )
+          }
+        }
+        self.requestStop()
+      }
+    }
+
+    copyGroup.enter()
+    DispatchQueue.global(qos: .userInitiated).async {
+      defer { copyGroup.leave() }
+      do {
+        let byteCount = try Self.copyBytes(from: childOutput.fileHandleForReading, to: self.output)
+        countLock.withLock { serviceToClientBytes = byteCount }
+      } catch {
+        countLock.withLock {
+          if firstRelayError == nil && !self.isStopRequested {
+            firstRelayError = .relayFailed(
+              direction: "service-to-client",
+              underlying: error.localizedDescription
+            )
+          }
+        }
+        self.requestStop()
+      }
+    }
+
+    child.waitUntilExit()
+    try? childInput.fileHandleForWriting.close()
+    let copyResult = copyGroup.wait(timeout: .now() + terminationGrace)
+    lock.withLock { process = nil }
+
+    if let relayError = countLock.withLock({ firstRelayError }) {
+      throw relayError
+    }
+    if copyResult == .timedOut {
+      throw OpaquePipeRelayError.relayFailed(
+        direction: "shutdown",
+        underlying: "a relay direction did not drain within the bounded grace period"
+      )
+    }
+
+    return Summary(
+      clientToServiceBytes: countLock.withLock { clientToServiceBytes },
+      serviceToClientBytes: countLock.withLock { serviceToClientBytes },
+      terminationStatus: child.terminationStatus
+    )
+  }
+
+  public func requestStop() {
+    let childPID: pid_t? = lock.withLock {
+      stopRequested = true
+      return process?.processIdentifier
+    }
+    try? input.close()
+    guard let childPID else { return }
+
+    kill(-childPID, SIGTERM)
+    let grace = terminationGrace
+    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + grace) {
+      let isSameRunningChild = self.lock.withLock {
+        self.process?.processIdentifier == childPID && self.process?.isRunning == true
+      }
+      if isSameRunningChild {
+        kill(-childPID, SIGKILL)
+      }
+    }
+  }
+
+  private func signalOwnedProcessGroup(_ signal: Int32) {
+    guard let childPID = process?.processIdentifier else { return }
+    kill(-childPID, signal)
+  }
+
+  private var isStopRequested: Bool {
+    lock.withLock { stopRequested }
+  }
+
+  private static func copyBytes(from source: FileHandle, to destination: FileHandle) throws
+    -> UInt64
+  {
+    var total: UInt64 = 0
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    let sourceDescriptor = source.fileDescriptor
+    let destinationDescriptor = destination.fileDescriptor
+    _ = fcntl(destinationDescriptor, F_SETNOSIGPIPE, 1)
+
+    while true {
+      let bytesRead = Darwin.read(sourceDescriptor, &buffer, buffer.count)
+      if bytesRead == 0 {
+        return total
+      }
+      if bytesRead < 0 {
+        if errno == EINTR { continue }
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+      }
+
+      var written = 0
+      while written < bytesRead {
+        let bytesWritten = buffer.withUnsafeBytes { rawBuffer in
+          Darwin.write(
+            destinationDescriptor,
+            rawBuffer.baseAddress!.advanced(by: written),
+            bytesRead - written
+          )
+        }
+        if bytesWritten < 0 {
+          if errno == EINTR { continue }
+          throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        written += bytesWritten
+      }
+      total += UInt64(bytesRead)
+    }
+  }
+}
+
+extension NSLock {
+  fileprivate func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    lock()
+    defer { unlock() }
+    return try body()
+  }
+}

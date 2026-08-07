@@ -6,17 +6,13 @@ load(
     "@build_bazel_rules_swift//swift:swift.bzl",
     "swift_library",
 )
-load(
-    "@com_github_buildbuddy_io_rules_xcodeproj//xcodeproj:xcodeproj.bzl",
-    "xcodeproj",
-)
 
 swift_library(
     name = "BazelXCBBuildService.library",
     module_name = "BazelXCBBuildService",
     srcs = glob(["Sources/**/*.swift"]),
     deps = [
-        "//BazelXCBBuildService/BEP",
+        "//Examples/BazelXCBBuildService/BEP",
         "@com_github_apple_swift_log//:Logging",
         "@com_github_apple_swift_nio//:NIO",
         "@com_github_mobilenativefoundation_xcbbuildserviceproxykit//:XCBBuildServiceProxyKit",
@@ -29,15 +25,6 @@ macos_command_line_application(
     name = "BazelXCBBuildService",
     minimum_os_version = "11.0",
     deps = [":BazelXCBBuildService.library"],
-)
-
-xcodeproj(
-    name = "xcodeproj",
-    project_name = "BazelXCBuildService",
-    targets = [
-        ":BazelXCBBuildService",
-    ],
-    tags = ["manual"],
 )
 
 sh_test(

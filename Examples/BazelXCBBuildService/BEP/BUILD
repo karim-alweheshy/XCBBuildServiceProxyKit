@@ -46,6 +46,6 @@ proto_library(
 
 swift_proto_library(
     name = "BEP",
-    visibility = ["//BazelXCBBuildService:__subpackages__"],
+    visibility = ["//Examples/BazelXCBBuildService:__subpackages__"],
     deps = [":build_event_stream_proto"],
 )
