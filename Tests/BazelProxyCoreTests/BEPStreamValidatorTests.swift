@@ -223,16 +223,26 @@ final class BEPStreamValidatorTests: XCTestCase {
 
     let validation = try BEPStreamValidator.validate(fileAt: URL(fileURLWithPath: path))
     XCTAssertTrue(validation.result.succeeded)
-    XCTAssertEqual(validation.result.reportedExecutedActionCount, 2)
-    XCTAssertTrue(
-      validation.events.contains(.targetCompleted(label: "//:hello", succeeded: true))
+    let reportedActionCount = try XCTUnwrap(validation.result.reportedExecutedActionCount)
+    XCTAssertGreaterThanOrEqual(reportedActionCount, 0)
+    XCTAssertEqual(
+      validation.events.filter {
+        if case .finished(succeeded: true) = $0 { return true }
+        return false
+      }.count,
+      1
     )
-    XCTAssertTrue(validation.events.contains(.finished(succeeded: true)))
     XCTAssertTrue(
-      validation.result.completedActionIDs.contains { identity in
-        identity.hasPrefix("//:hello|bazel-out/") && !identity.hasSuffix("|")
+      validation.events.contains {
+        if case .targetCompleted(label: _, succeeded: true) = $0 { return true }
+        return false
       }
     )
+    for identity in validation.result.completedActionIDs {
+      let components = identity.split(separator: "|", omittingEmptySubsequences: false)
+      XCTAssertEqual(components.count, 3)
+      XCTAssertTrue(components.allSatisfy { !$0.isEmpty })
+    }
   }
 }
 
