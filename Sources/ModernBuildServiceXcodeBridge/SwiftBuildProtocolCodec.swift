@@ -40,6 +40,23 @@ enum SwiftBuildProtocolCodec {
     )
   }
 
+  static func encodeStringListMacroEvaluationRequest(
+    sessionHandle: String,
+    targetGUID: String,
+    buildParameters: BuildParametersMessagePayload,
+    macroName: String
+  ) -> [UInt8] {
+    encode(
+      MacroEvaluationRequest(
+        sessionHandle: sessionHandle,
+        context: .components(level: .target(targetGUID), buildParameters: buildParameters),
+        request: .macro(macroName),
+        overrides: nil,
+        resultType: .stringList
+      )
+    )
+  }
+
   static func decodeMacroEvaluationResponse(_ payload: [UInt8]) throws -> [String] {
     let message = try decodeIPCMessage(payload)
     guard let response = message.message as? MacroEvaluationResponse else {

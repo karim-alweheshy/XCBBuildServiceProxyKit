@@ -69,12 +69,44 @@ final class SwiftBuildProtocolCodecTests: XCTestCase {
     XCTAssertEqual(request.resultType, .stringList)
   }
 
+  func testStringListMacroCodecPreservesTypeAndEffectiveParameters() throws {
+    let parameters = makeBuildParameters(action: "install", configuration: "Release")
+
+    let payload = SwiftBuildProtocolCodec.encodeStringListMacroEvaluationRequest(
+      sessionHandle: "SESSION-1",
+      targetGUID: "TARGET-B",
+      buildParameters: parameters,
+      macroName: "TOOLCHAINS"
+    )
+    let message = try SwiftBuildProtocolCodec.decodeIPCMessage(payload)
+    let request = try XCTUnwrap(message.message as? MacroEvaluationRequest)
+    guard case .components(let level, let decodedParameters) = request.context else {
+      return XCTFail("Expected component-scoped macro evaluation")
+    }
+    guard case .target(let guid) = level else {
+      return XCTFail("Expected target-scoped macro evaluation")
+    }
+    guard case .macro(let macroName) = request.request else {
+      return XCTFail("Expected a declared macro request")
+    }
+
+    XCTAssertEqual(request.sessionHandle, "SESSION-1")
+    XCTAssertEqual(guid, "TARGET-B")
+    XCTAssertEqual(decodedParameters, parameters)
+    XCTAssertEqual(macroName, "TOOLCHAINS")
+    XCTAssertNil(request.overrides)
+    XCTAssertEqual(request.resultType, .stringList)
+  }
+
   func testAcceptedXcode17F42MacroEvaluationCompatibilityFixtures() throws {
     let requestBase64 =
       "uE1BQ1JPX0VWQUxVQVRJT05fUkVRVUVTVMUBjHsiY29udGV4dCI6eyJjb21wb25lbnRzIjp7ImJ1aWxkUGFyYW1ldGVycyI6eyJhY3Rpb24iOiJpbnN0YWxsIiwiYWN0aXZlQXJjaGl0ZWN0dXJlIjoiYXJtNjQiLCJjb25maWd1cmF0aW9uIjoiUmVsZWFzZSIsIm92ZXJyaWRlcyI6eyJjb21tYW5kTGluZSI6e30sImNvbW1hbmRMaW5lQ29uZmlnIjp7fSwiZW52aXJvbm1lbnRDb25maWciOnt9LCJzeW50aGVzaXplZCI6e319fSwibGV2ZWwiOnsidGFyZ2V0Ijp7Il8wIjoiVEFSR0VULUIifX19fSwicmVxdWVzdCI6eyJzdHJpbmdFeHByZXNzaW9uQXJyYXkiOnsiXzAiOlsiJChCQVpFTF9MQUJFTCkiLCIkKFRBUkdFVF9CVUlMRF9ESVIpIl19fSwicmVzdWx0VHlwZSI6eyJzdHJpbmdMaXN0Ijp7fX0sInNlc3Npb25IYW5kbGUiOiJTRVNTSU9OLTEifQ=="
+    let listMacroRequestBase64 =
+      "uE1BQ1JPX0VWQUxVQVRJT05fUkVRVUVTVMUBYHsiY29udGV4dCI6eyJjb21wb25lbnRzIjp7ImJ1aWxkUGFyYW1ldGVycyI6eyJhY3Rpb24iOiJpbnN0YWxsIiwiYWN0aXZlQXJjaGl0ZWN0dXJlIjoiYXJtNjQiLCJjb25maWd1cmF0aW9uIjoiUmVsZWFzZSIsIm92ZXJyaWRlcyI6eyJjb21tYW5kTGluZSI6e30sImNvbW1hbmRMaW5lQ29uZmlnIjp7fSwiZW52aXJvbm1lbnRDb25maWciOnt9LCJzeW50aGVzaXplZCI6e319fSwibGV2ZWwiOnsidGFyZ2V0Ijp7Il8wIjoiVEFSR0VULUIifX19fSwicmVxdWVzdCI6eyJtYWNybyI6eyJfMCI6IlRPT0xDSEFJTlMifX0sInJlc3VsdFR5cGUiOnsic3RyaW5nTGlzdCI6e319LCJzZXNzaW9uSGFuZGxlIjoiU0VTU0lPTi0xIn0="
     let responseBase64 =
       "uU1BQ1JPX0VWQUxVQVRJT05fUkVTUE9OU0XENnsicmVzdWx0Ijp7InN0cmluZ0xpc3QiOnsiXzAiOlsidmFsdWUtYSIsInZhbHVlLWIiXX19fQ=="
     let requestFixture = try XCTUnwrap(Data(base64Encoded: requestBase64))
+    let listMacroRequestFixture = try XCTUnwrap(Data(base64Encoded: listMacroRequestBase64))
     let responseFixture = try XCTUnwrap(Data(base64Encoded: responseBase64))
 
     XCTAssertEqual(
@@ -82,6 +114,9 @@ final class SwiftBuildProtocolCodecTests: XCTestCase {
     XCTAssertEqual(
       sha256(responseFixture),
       "9c6b0271fedc02b7b9be33a3af9595b2112316cb17296d345f5fe914bd67ef00")
+    XCTAssertEqual(
+      sha256(listMacroRequestFixture),
+      "12ade669bd0efcd35dfd73b31c6e0d756121a75c1e2fdc98286cba2e26e5f5a6")
 
     let requestIPC = try SwiftBuildProtocolCodec.decodeIPCMessage(Array(requestFixture))
     let request = try XCTUnwrap(requestIPC.message as? MacroEvaluationRequest)
@@ -97,6 +132,20 @@ final class SwiftBuildProtocolCodecTests: XCTestCase {
     XCTAssertEqual(parameters.configuration, "Release")
     XCTAssertEqual(expressions, ["$(BAZEL_LABEL)", "$(TARGET_BUILD_DIR)"])
     XCTAssertEqual(SwiftBuildProtocolCodec.encode(request), Array(requestFixture))
+
+    let listRequestIPC = try SwiftBuildProtocolCodec.decodeIPCMessage(
+      Array(listMacroRequestFixture)
+    )
+    let listRequest = try XCTUnwrap(listRequestIPC.message as? MacroEvaluationRequest)
+    guard case .macro(let listMacroName) = listRequest.request else {
+      return XCTFail("Expected declared list-macro fixture")
+    }
+    XCTAssertEqual(listMacroName, "TOOLCHAINS")
+    XCTAssertEqual(listRequest.resultType, .stringList)
+    XCTAssertEqual(
+      SwiftBuildProtocolCodec.encode(listRequest),
+      Array(listMacroRequestFixture)
+    )
 
     let values = try SwiftBuildProtocolCodec.decodeMacroEvaluationResponse(
       Array(responseFixture)

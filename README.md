@@ -43,6 +43,9 @@ native service to evaluate the fixed build-plan roles plus the manifest's
 `environmentKeys`, then forwards the original request bytes unchanged whether
 the probe succeeds or fails. The report contains setting names, non-empty
 presence, UTF-8 byte lengths, and SHA-256 digests, never setting values.
+`TOOLCHAINS` is evaluated separately as its declared string-list macro and is
+canonicalized with Swift Build's space-joined shell-environment convention; it
+is never included in the scalar expression batch.
 
 The Xcode bridge alone uses the unmodified public `SWBProtocol` and `SWBUtil`
 products from Swift Build commit
