@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import ModernBuildServiceProxyCore
+import ModernBuildServiceXcodeBridge
 
 private let softwareConfigurationError: Int32 = 78
 
@@ -22,10 +23,40 @@ do {
   let metadataRecorder = try ProcessInfo.processInfo.environment["XCBPROXY_METADATA_PATH"]
     .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: false) }
     .map(BuildServiceFrameMetadataRecorder.init(fileURL:))
+  let probeManifestPath = ProcessInfo.processInfo.environment[
+    "XCBPROXY_SETTINGS_PROBE_MANIFEST_PATH"]
+  let probeReportPath = ProcessInfo.processInfo.environment[
+    "XCBPROXY_SETTINGS_PROBE_REPORT_PATH"]
+  let settingsProbe: EvaluatedSettingsProbe?
+  if let probeManifestPath, !probeManifestPath.isEmpty,
+    let probeReportPath, !probeReportPath.isEmpty
+  {
+    do {
+      settingsProbe = try EvaluatedSettingsProbe(
+        manifestURL: URL(fileURLWithPath: probeManifestPath, isDirectory: false),
+        reportURL: URL(fileURLWithPath: probeReportPath, isDirectory: false)
+      )
+    } catch {
+      FileHandle.standardError.write(
+        Data("ModernBuildServiceProxy: settings probe disabled; private report unavailable\n".utf8)
+      )
+      settingsProbe = nil
+    }
+  } else {
+    if probeManifestPath?.isEmpty == false || probeReportPath?.isEmpty == false {
+      FileHandle.standardError.write(
+        Data(
+          "ModernBuildServiceProxy: settings probe disabled; both opt-in paths are required\n".utf8)
+      )
+    }
+    settingsProbe = nil
+  }
+  defer { settingsProbe?.finishIfNeeded() }
   let relay = OpaquePipeRelay(
     executableURL: resolution.serviceExecutableURL,
     environment: childEnvironment,
-    metadataRecorder: metadataRecorder
+    metadataRecorder: metadataRecorder,
+    frameInterceptor: settingsProbe
   )
 
   let signalQueue = DispatchQueue(label: "ModernBuildServiceProxy.signals")

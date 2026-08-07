@@ -5,6 +5,37 @@ import XCTest
 @testable import ModernBuildServiceProxyCore
 
 final class BuildServiceFrameRelayTests: XCTestCase {
+  func testInterceptorInjectsOnHeldChannelThenForwardsOriginalFrameByteIdentically() throws {
+    let createName = Array("CREATE_BUILD".utf8)
+    let noncanonicalPayload =
+      [0xD9, UInt8(createName.count)] + createName
+      + [0xCC, 0x2A, 0x81, 0xA1, 0x78, 0xCC, 0x01]
+    let originalBytes = makeFrame(channel: 0x1020_3040, payload: noncanonicalPayload)
+    let injectedPayload = Array("injected-probe-request".utf8)
+    let reader = FragmentedReader(bytes: originalBytes, fragmentSizes: [1, 3, 2, 7, 5])
+    let writer = ShortWriter(maximumWriteLength: 4)
+    let interceptor = InjectThenForwardInterceptor(injectedPayload: injectedPayload)
+
+    let summary = try BuildServiceFramePump(
+      direction: .clientToService,
+      reader: reader,
+      writer: writer,
+      recorder: nil,
+      interceptor: interceptor
+    ).run()
+
+    XCTAssertEqual(interceptor.observedFrame?.header, Array(originalBytes.prefix(12)))
+    XCTAssertEqual(interceptor.observedFrame?.payload, noncanonicalPayload)
+    XCTAssertEqual(interceptor.observedFrame?.channel, 0x1020_3040)
+    XCTAssertEqual(interceptor.observedFrame?.messageName, "CREATE_BUILD")
+    XCTAssertEqual(
+      writer.bytes,
+      makeFrame(channel: 0x1020_3040, payload: injectedPayload) + originalBytes
+    )
+    XCTAssertEqual(summary.frameCount, 1)
+    XCTAssertEqual(summary.byteCount, UInt64(originalBytes.count))
+  }
+
   func testForwardsUnknownNoncanonicalFramesByteIdenticallyWithPartialIO() throws {
     let unknownMessage = Array("FUTURE_MESSAGE".utf8)
     let sensitiveBody = Array("sensitive-body-value".utf8)
@@ -140,6 +171,34 @@ final class BuildServiceFrameRelayTests: XCTestCase {
         .metadataFileAlreadyExists(fixture.fileURL.path)
       )
     }
+  }
+}
+
+private final class InjectThenForwardInterceptor: BuildServiceFrameInterceptor {
+  let injectedPayload: [UInt8]
+  private(set) var observedFrame: BuildServiceRawFrame?
+
+  init(injectedPayload: [UInt8]) {
+    self.injectedPayload = injectedPayload
+  }
+
+  func shouldIntercept(
+    direction: BuildServiceFrameDirection,
+    channel: UInt64,
+    payloadLength: UInt32,
+    messageName: String?
+  ) -> Bool {
+    direction == .clientToService && messageName == "CREATE_BUILD"
+  }
+
+  func intercept(
+    direction: BuildServiceFrameDirection,
+    frame: BuildServiceRawFrame,
+    send: (BuildServiceRawFrame) throws -> Void
+  ) throws -> Bool {
+    observedFrame = frame
+    try send(BuildServiceRawFrame(channel: frame.channel, payload: injectedPayload))
+    return false
   }
 }
 

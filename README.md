@@ -34,6 +34,21 @@ Records contain only direction, sequence, channel, payload length, the leading
 MessagePack message-name string when safely recognizable, and payload SHA-256.
 Payload bytes and environment values are never recorded.
 
+An evaluated-settings probe is available only when both
+`XCBPROXY_SETTINGS_PROBE_MANIFEST_PATH` and
+`XCBPROXY_SETTINGS_PROBE_REPORT_PATH` name explicit files. The manifest must
+use rules_xcodeproj schema v2. The report path must not exist; the proxy creates
+it exclusively with mode 0600. For the first `CREATE_BUILD`, the probe asks the
+native service to evaluate the fixed build-plan roles plus the manifest's
+`environmentKeys`, then forwards the original request bytes unchanged whether
+the probe succeeds or fails. The report contains setting names, non-empty
+presence, UTF-8 byte lengths, and SHA-256 digests, never setting values.
+
+The Xcode bridge alone uses the unmodified public `SWBProtocol` and `SWBUtil`
+products from Swift Build commit
+`e4f6fc77ebe727657dadfedf50462f5a1a626ead`. The transport core has no Swift
+Build dependency, and this probe does not intercept or launch Bazel.
+
 This target intentionally contains no Bazel interception, protocol model, or
 project-selection behavior. It is the reversible pass-through feasibility gate
 for a future modern proxy.

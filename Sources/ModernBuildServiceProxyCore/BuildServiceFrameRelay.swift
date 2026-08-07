@@ -189,25 +189,36 @@ struct BuildServiceFramePumpSummary: Equatable {
 final class BuildServiceFramePump {
   static let headerLength = 12
   static let maximumPayloadLength = UInt32(Int32.max)
+  static let maximumInterceptedPayloadLength: UInt32 = 16 * 1024 * 1024
 
   private let direction: BuildServiceFrameDirection
   private let reader: FrameByteReader
   private let writer: FrameByteWriter
   private let recorder: BuildServiceFrameMetadataRecorder?
+  private let interceptor: (any BuildServiceFrameInterceptor)?
 
   init(
     direction: BuildServiceFrameDirection,
     reader: FrameByteReader,
     writer: FrameByteWriter,
-    recorder: BuildServiceFrameMetadataRecorder?
+    recorder: BuildServiceFrameMetadataRecorder?,
+    interceptor: (any BuildServiceFrameInterceptor)? = nil
   ) {
     self.direction = direction
     self.reader = reader
     self.writer = writer
     self.recorder = recorder
+    self.interceptor = interceptor
   }
 
   func run() throws -> BuildServiceFramePumpSummary {
+    guard let interceptor else {
+      return try runOpaque()
+    }
+    return try runIntercepting(with: interceptor)
+  }
+
+  private func runOpaque() throws -> BuildServiceFramePumpSummary {
     var frameCount: UInt64 = 0
     var byteCount: UInt64 = 0
     var payloadBuffer: [UInt8]?
@@ -268,6 +279,180 @@ final class BuildServiceFramePump {
     return BuildServiceFramePumpSummary(frameCount: frameCount, byteCount: byteCount)
   }
 
+  private func runIntercepting(with interceptor: any BuildServiceFrameInterceptor) throws
+    -> BuildServiceFramePumpSummary
+  {
+    var frameCount: UInt64 = 0
+    var byteCount: UInt64 = 0
+    var payloadBuffer: [UInt8]?
+
+    while let header = try readHeader() {
+      let channel = Self.decodeUInt64LittleEndian(header[0..<8])
+      let payloadLength = Self.decodeUInt32LittleEndian(header[8..<12])
+      guard payloadLength <= Self.maximumPayloadLength else {
+        throw BuildServiceFrameRelayError.payloadTooLarge(payloadLength)
+      }
+
+      let prefixLength = min(Int(payloadLength), MessagePackMessageNamePeeker.maximumPrefixBytes)
+      var prefix = [UInt8](repeating: 0, count: prefixLength)
+      var payloadBytesRead: UInt32 = 0
+      var payloadHasher = SHA256()
+      var messageNamePeeker = MessagePackMessageNamePeeker()
+
+      if prefixLength > 0 {
+        try readPayloadBytes(into: &prefix, totalRead: &payloadBytesRead, expected: payloadLength)
+        prefix.withUnsafeBytes {
+          messageNamePeeker.consume($0)
+          payloadHasher.update(data: Data($0))
+        }
+      }
+
+      let messageName = messageNamePeeker.messageName
+      var shouldIntercept = interceptor.shouldIntercept(
+        direction: direction,
+        channel: channel,
+        payloadLength: payloadLength,
+        messageName: messageName
+      )
+      var discardOversizeInterceptedFrame = false
+      if shouldIntercept, payloadLength > Self.maximumInterceptedPayloadLength {
+        discardOversizeInterceptedFrame = interceptor.interceptionDidFail(
+          direction: direction,
+          channel: channel,
+          messageName: messageName,
+          failure: .capturedPayloadTooLarge(
+            actualBytes: payloadLength,
+            maximumBytes: Self.maximumInterceptedPayloadLength
+          )
+        )
+        shouldIntercept = false
+      }
+
+      if shouldIntercept {
+        var payload = prefix
+        if payloadBytesRead < payloadLength, payloadBuffer == nil {
+          payloadBuffer = [UInt8](repeating: 0, count: 64 * 1024)
+        }
+        while payloadBytesRead < payloadLength {
+          let count = try readPayloadChunk(
+            into: &payloadBuffer!,
+            totalRead: payloadBytesRead,
+            expected: payloadLength
+          )
+          payloadBuffer!.withUnsafeBytes { bytes in
+            let chunk = UnsafeRawBufferPointer(rebasing: bytes[..<count])
+            payload.append(contentsOf: chunk)
+            payloadHasher.update(data: Data(chunk))
+          }
+          payloadBytesRead += UInt32(count)
+        }
+
+        let frame = BuildServiceRawFrame(
+          header: header,
+          payload: payload,
+          channel: channel,
+          messageName: messageName
+        )
+        let consumed = try interceptor.intercept(
+          direction: direction,
+          frame: frame,
+          send: { injectedFrame in
+            try Self.write(frame: injectedFrame, to: writer)
+          }
+        )
+        if !consumed {
+          try Self.write(frame: frame, to: writer)
+        }
+      } else {
+        if !discardOversizeInterceptedFrame {
+          try header.withUnsafeBytes { try writer.writeAll($0) }
+          try prefix.withUnsafeBytes { try writer.writeAll($0) }
+        }
+        if payloadBytesRead < payloadLength, payloadBuffer == nil {
+          payloadBuffer = [UInt8](repeating: 0, count: 64 * 1024)
+        }
+        while payloadBytesRead < payloadLength {
+          let count = try readPayloadChunk(
+            into: &payloadBuffer!,
+            totalRead: payloadBytesRead,
+            expected: payloadLength
+          )
+          try payloadBuffer!.withUnsafeBytes { bytes in
+            let chunk = UnsafeRawBufferPointer(rebasing: bytes[..<count])
+            payloadHasher.update(data: Data(chunk))
+            if !discardOversizeInterceptedFrame {
+              try writer.writeAll(chunk)
+            }
+          }
+          payloadBytesRead += UInt32(count)
+        }
+      }
+
+      frameCount += 1
+      byteCount += UInt64(Self.headerLength) + UInt64(payloadLength)
+      try recorder?.record(
+        direction: direction,
+        directionSequence: frameCount,
+        channel: channel,
+        payloadLength: payloadLength,
+        messageName: messageName,
+        payloadSHA256: payloadHasher.finalize().hexadecimalString
+      )
+    }
+
+    return BuildServiceFramePumpSummary(frameCount: frameCount, byteCount: byteCount)
+  }
+
+  private func readPayloadBytes(
+    into bytes: inout [UInt8],
+    totalRead: inout UInt32,
+    expected: UInt32
+  ) throws {
+    var offset = 0
+    while offset < bytes.count {
+      let count = try bytes.withUnsafeMutableBytes { buffer in
+        try reader.read(into: UnsafeMutableRawBufferPointer(rebasing: buffer[offset...]))
+      }
+      if count == 0 {
+        throw BuildServiceFrameRelayError.truncatedPayload(
+          expectedBytes: expected,
+          actualBytes: totalRead
+        )
+      }
+      guard count > 0, count <= bytes.count - offset else {
+        throw BuildServiceFrameRelayError.invalidReadCount(count)
+      }
+      offset += count
+      totalRead += UInt32(count)
+    }
+  }
+
+  private func readPayloadChunk(
+    into buffer: inout [UInt8],
+    totalRead: UInt32,
+    expected: UInt32
+  ) throws -> Int {
+    let requestedCount = min(Int(expected - totalRead), buffer.count)
+    let count = try buffer.withUnsafeMutableBytes { bytes in
+      try reader.read(into: UnsafeMutableRawBufferPointer(rebasing: bytes[..<requestedCount]))
+    }
+    if count == 0 {
+      throw BuildServiceFrameRelayError.truncatedPayload(
+        expectedBytes: expected,
+        actualBytes: totalRead
+      )
+    }
+    guard count > 0, count <= requestedCount else {
+      throw BuildServiceFrameRelayError.invalidReadCount(count)
+    }
+    return count
+  }
+
+  private static func write(frame: BuildServiceRawFrame, to writer: FrameByteWriter) throws {
+    try frame.header.withUnsafeBytes { try writer.writeAll($0) }
+    try frame.payload.withUnsafeBytes { try writer.writeAll($0) }
+  }
+
   private func readHeader() throws -> [UInt8]? {
     var header = [UInt8](repeating: 0, count: Self.headerLength)
     var count = 0
@@ -302,7 +487,7 @@ final class BuildServiceFramePump {
 
 private struct MessagePackMessageNamePeeker {
   private static let maximumMessageNameBytes = 256
-  private static let maximumPrefixBytes = maximumMessageNameBytes + 5
+  fileprivate static let maximumPrefixBytes = maximumMessageNameBytes + 5
   private var prefix: [UInt8] = []
 
   mutating func consume(_ bytes: UnsafeRawBufferPointer) {
