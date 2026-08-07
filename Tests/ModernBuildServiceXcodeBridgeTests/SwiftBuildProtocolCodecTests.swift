@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import SWBProtocol
+import SWBUtil
 import XCTest
 
 @testable import ModernBuildServiceXcodeBridge
@@ -154,7 +155,9 @@ func makeCreateBuildRequest(
   targets: [ConfiguredTargetMessagePayload],
   buildCommand: BuildCommandMessagePayload = .build(style: .buildOnly, skipDependencies: false),
   parameters: BuildParametersMessagePayload = makeBuildParameters(),
-  responseChannel: UInt64 = 91
+  responseChannel: UInt64 = 91,
+  containerPath: Path? = nil,
+  onlyCreateBuildDescription: Bool = false
 ) -> CreateBuildRequest {
   CreateBuildRequest(
     sessionHandle: "SESSION-1",
@@ -174,13 +177,13 @@ func makeCreateBuildRequest(
       buildPlanDiagnosticsDirPath: nil,
       buildCommand: buildCommand,
       schemeCommand: .launch,
-      containerPath: nil,
+      containerPath: containerPath,
       buildDescriptionID: nil,
       qos: .userInitiated,
       schedulerLaneWidthOverride: nil,
       jsonRepresentation: nil
     ),
-    onlyCreateBuildDescription: false,
+    onlyCreateBuildDescription: onlyCreateBuildDescription,
     retainBuildDescription: false
   )
 }

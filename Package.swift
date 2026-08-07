@@ -33,6 +33,7 @@ let package = Package(
     .target(
       name: "ModernBuildServiceXcodeBridge",
       dependencies: [
+        "BazelProxyCore",
         "ModernBuildServiceProxyCore",
         .product(name: "SWBProtocol", package: "swift-build"),
         .product(name: "SWBUtil", package: "swift-build"),
@@ -52,6 +53,7 @@ let package = Package(
     .testTarget(
       name: "ModernBuildServiceXcodeBridgeTests",
       dependencies: [
+        "BazelProxyCore",
         "ModernBuildServiceXcodeBridge",
         .product(name: "SWBProtocol", package: "swift-build"),
         .product(name: "SWBUtil", package: "swift-build"),

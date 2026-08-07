@@ -1,8 +1,10 @@
 import Foundation
 
 public enum NativeForwardReason: Equatable, Sendable {
+  case buildDescriptionOnly
   case ignoredTargetsOnly
   case noRequestedTargets
+  case unrelatedProject
   case unmappedTarget(String)
   case unsupportedAction(String)
   case unsupportedMode(String)
