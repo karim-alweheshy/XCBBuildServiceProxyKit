@@ -37,6 +37,53 @@ final class BazelActionDetailsTests: XCTestCase {
     XCTAssertEqual(validation.record(for: key), validation.records[0])
   }
 
+  func testExecutionLogParsesBazelPrettyPrintedJSONSequence() throws {
+    let fixture = try TemporaryExecutionLog()
+    defer { fixture.remove() }
+    try fixture.write(
+      """
+      {
+        "commandArgs": ["swiftc", "Input.swift"],
+        "environmentVariables": [{"name": "PRIVATE_VALUE", "value": "not-decoded"}],
+        "listedOutputs": ["bazel-out/App.swiftmodule"],
+        "mnemonic": "SwiftCompile",
+        "runner": "local sandbox",
+        "cacheHit": false,
+        "exitCode": 0,
+        "targetLabel": "//app:App"
+      }
+      {
+        "commandArgs": ["libtool", "-o", "bazel-out/libApp.a"],
+        "listedOutputs": ["bazel-out/libApp.a"],
+        "mnemonic": "CppArchive",
+        "runner": "disk cache hit",
+        "cacheHit": true,
+        "exitCode": 0,
+        "targetLabel": "//app:App"
+      }
+      """
+    )
+
+    let validation = try BazelExecutionLogValidator.validate(fileAt: fixture.url)
+    XCTAssertEqual(validation.records.count, 2)
+    XCTAssertEqual(validation.records[0].mnemonic, "SwiftCompile")
+    XCTAssertEqual(validation.records[1].cacheKind, .disk)
+  }
+
+  func testParsesOptInRealBazelExecutionLog() throws {
+    guard
+      let path = ProcessInfo.processInfo.environment["BAZEL_PROXY_REAL_EXECUTION_LOG_PATH"],
+      !path.isEmpty
+    else {
+      throw XCTSkip("Set BAZEL_PROXY_REAL_EXECUTION_LOG_PATH to opt in.")
+    }
+
+    let validation = try BazelExecutionLogValidator.validate(
+      fileAt: URL(fileURLWithPath: path)
+    )
+    XCTAssertFalse(validation.records.isEmpty)
+  }
+
   func testExecutionLogRejectsMalformedOversizedSymlinkAndAmbiguousData() throws {
     let fixture = try TemporaryExecutionLog()
     defer { fixture.remove() }
@@ -54,6 +101,21 @@ final class BazelActionDetailsTests: XCTestCase {
       )
     ) { error in
       XCTAssertEqual(error as? BazelExecutionLogError, .fileLimitExceeded(64))
+    }
+
+    try fixture.write(#"{"listedOutputs":["012345678901234567890123456789"]}"#)
+    XCTAssertThrowsError(
+      try BazelExecutionLogValidator.validate(
+        fileAt: fixture.url,
+        limits: BazelExecutionLogLimits(maximumFileBytes: 128, maximumLineBytes: 32)
+      )
+    ) { error in
+      XCTAssertEqual(error as? BazelExecutionLogError, .lineLimitExceeded(32))
+    }
+
+    try fixture.write(#"{"listedOutputs":[]}["unexpected"]"#)
+    XCTAssertThrowsError(try BazelExecutionLogValidator.validate(fileAt: fixture.url)) { error in
+      XCTAssertEqual(error as? BazelExecutionLogError, .malformedJSONLine)
     }
 
     try fixture.write(

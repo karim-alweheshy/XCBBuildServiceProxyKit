@@ -215,7 +215,7 @@ public struct BazelExecutionLogLimits: Equatable, Sendable {
 
   public init(
     maximumFileBytes: Int = 256 * 1024 * 1024,
-    maximumLineBytes: Int = 1024 * 1024,
+    maximumLineBytes: Int = 64 * 1024 * 1024,
     command: BazelCommandDisplayLimits = BazelCommandDisplayLimits()
   ) {
     self.maximumFileBytes = maximumFileBytes
@@ -242,7 +242,7 @@ public enum BazelExecutionLogError: LocalizedError, Equatable, Sendable {
     case .invalidLimits:
       return "The Bazel execution-log limits are invalid."
     case .lineLimitExceeded(let limit):
-      return "The Bazel execution log contains a line larger than \(limit) bytes."
+      return "The Bazel execution log contains a record larger than \(limit) bytes."
     case .malformedJSONLine:
       return "The Bazel execution log contains malformed JSON."
     case .readFailed(let errorNumber):
@@ -301,17 +301,16 @@ public enum BazelExecutionLogValidator {
 
     var records = [BazelExecutionRecord]()
     var recordsByKey = [BazelActionReconciliationKey: BazelExecutionRecord]()
-    for line in data.split(separator: 0x0A, omittingEmptySubsequences: false) {
-      if line.isEmpty {
-        if line.startIndex == data.endIndex { continue }
-        continue
-      }
-      guard line.count <= limits.maximumLineBytes else {
-        throw BazelExecutionLogError.lineLimitExceeded(limits.maximumLineBytes)
-      }
+    for recordRange in try splitJSONSequence(
+      data,
+      maximumRecordBytes: limits.maximumLineBytes
+    ) {
       let raw: RawExecutionRecord
       do {
-        raw = try JSONDecoder().decode(RawExecutionRecord.self, from: Data(line))
+        raw = try JSONDecoder().decode(
+          RawExecutionRecord.self,
+          from: data.subdata(in: recordRange)
+        )
       } catch {
         throw BazelExecutionLogError.malformedJSONLine
       }
@@ -357,6 +356,77 @@ public enum BazelExecutionLogValidator {
       records: records,
       recordsByKey: recordsByKey
     )
+  }
+
+  /// Bazel 9 writes `--execution_log_json_file` as consecutive, pretty-printed top-level JSON
+  /// objects separated only by whitespace. It is neither a JSON array nor JSON Lines. Split the
+  /// bounded file structurally without decoding or retaining any non-allowlisted fields.
+  private static func splitJSONSequence(
+    _ data: Data,
+    maximumRecordBytes: Int
+  ) throws -> [Range<Data.Index>] {
+    var index = data.startIndex
+    var result = [Range<Data.Index>]()
+
+    func isWhitespace(_ byte: UInt8) -> Bool {
+      byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+    }
+
+    while index < data.endIndex {
+      while index < data.endIndex, isWhitespace(data[index]) { index += 1 }
+      guard index < data.endIndex else { break }
+      guard data[index] == 0x7B else { throw BazelExecutionLogError.malformedJSONLine }
+
+      let start = index
+      var expectedClosures = [UInt8]()
+      var inString = false
+      var escaped = false
+      var recordEnd: Int?
+      while index < data.endIndex {
+        guard index - start < maximumRecordBytes else {
+          throw BazelExecutionLogError.lineLimitExceeded(maximumRecordBytes)
+        }
+        let byte = data[index]
+        if inString {
+          if escaped {
+            escaped = false
+          } else if byte == 0x5C {
+            escaped = true
+          } else if byte == 0x22 {
+            inString = false
+          } else if byte < 0x20 {
+            throw BazelExecutionLogError.malformedJSONLine
+          }
+        } else {
+          switch byte {
+          case 0x22:
+            inString = true
+          case 0x7B:
+            expectedClosures.append(0x7D)
+          case 0x5B:
+            expectedClosures.append(0x5D)
+          case 0x7D, 0x5D:
+            guard expectedClosures.popLast() == byte else {
+              throw BazelExecutionLogError.malformedJSONLine
+            }
+            if expectedClosures.isEmpty {
+              recordEnd = index + 1
+              index += 1
+              break
+            }
+          default:
+            break
+          }
+        }
+        if recordEnd != nil { break }
+        index += 1
+      }
+      guard let recordEnd, !inString, expectedClosures.isEmpty else {
+        throw BazelExecutionLogError.malformedJSONLine
+      }
+      result.append(start..<recordEnd)
+    }
+    return result
   }
 
   private static func reconciliationEquivalent(
