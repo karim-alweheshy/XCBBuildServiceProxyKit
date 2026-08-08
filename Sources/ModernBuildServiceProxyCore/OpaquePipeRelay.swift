@@ -106,9 +106,44 @@ public final class OpaquePipeRelay {
 
     let copyGroup = DispatchGroup()
     let countLock = NSLock()
+    let failureLatch = FirstErrorLatch<OpaquePipeRelayError>()
     var clientToServiceBytes: UInt64 = 0
     var serviceToClientBytes: UInt64 = 0
-    var firstRelayError: OpaquePipeRelayError?
+
+    let recordFailure: (OpaquePipeRelayError) -> Void = { [weak self] failure in
+      guard failureLatch.record(failure) else { return }
+      self?.requestStop()
+    }
+    let toNative = SerializedFrameSink(
+      writer: FileDescriptorFrameWriter(
+        descriptor: childInput.fileHandleForWriting.fileDescriptor
+      ),
+      onFirstFailure: { [weak self] error in
+        guard let self, !self.isStopRequested else { return }
+        recordFailure(
+          .relayFailed(
+            direction: "client-to-service",
+            underlying: error.localizedDescription
+          )
+        )
+      }
+    )
+    let toXcode = SerializedFrameSink(
+      writer: FileDescriptorFrameWriter(descriptor: output.fileDescriptor),
+      onFirstFailure: { [weak self] error in
+        guard let self, !self.isStopRequested else { return }
+        recordFailure(
+          .relayFailed(
+            direction: "service-to-client",
+            underlying: error.localizedDescription
+          )
+        )
+      }
+    )
+    let outputs = BuildServiceFrameOutputs(
+      sendToNative: toNative.send,
+      sendToXcode: toXcode.send
+    )
 
     copyGroup.enter()
     DispatchQueue.global(qos: .userInitiated).async {
@@ -120,22 +155,21 @@ public final class OpaquePipeRelay {
         let summary = try BuildServiceFramePump(
           direction: .clientToService,
           reader: FileDescriptorFrameReader(descriptor: self.input.fileDescriptor),
-          writer: FileDescriptorFrameWriter(
-            descriptor: childInput.fileHandleForWriting.fileDescriptor),
+          sink: toNative,
           recorder: self.metadataRecorder,
-          interceptor: self.frameInterceptor
+          interceptor: self.frameInterceptor,
+          outputs: outputs
         ).run()
         countLock.withLock { clientToServiceBytes = summary.byteCount }
       } catch {
-        countLock.withLock {
-          if firstRelayError == nil && !self.isStopRequested {
-            firstRelayError = .relayFailed(
+        if !self.isStopRequested {
+          recordFailure(
+            .relayFailed(
               direction: "client-to-service",
               underlying: error.localizedDescription
             )
-          }
+          )
         }
-        self.requestStop()
       }
     }
 
@@ -147,21 +181,21 @@ public final class OpaquePipeRelay {
           direction: .serviceToClient,
           reader: FileDescriptorFrameReader(
             descriptor: childOutput.fileHandleForReading.fileDescriptor),
-          writer: FileDescriptorFrameWriter(descriptor: self.output.fileDescriptor),
+          sink: toXcode,
           recorder: self.metadataRecorder,
-          interceptor: self.frameInterceptor
+          interceptor: self.frameInterceptor,
+          outputs: outputs
         ).run()
         countLock.withLock { serviceToClientBytes = summary.byteCount }
       } catch {
-        countLock.withLock {
-          if firstRelayError == nil && !self.isStopRequested {
-            firstRelayError = .relayFailed(
+        if !self.isStopRequested {
+          recordFailure(
+            .relayFailed(
               direction: "service-to-client",
               underlying: error.localizedDescription
             )
-          }
+          )
         }
-        self.requestStop()
       }
     }
 
@@ -170,7 +204,7 @@ public final class OpaquePipeRelay {
     let copyResult = copyGroup.wait(timeout: .now() + terminationGrace)
     lock.withLock { process = nil }
 
-    if let relayError = countLock.withLock({ firstRelayError }) {
+    if let relayError = failureLatch.first {
       throw relayError
     }
     if copyResult == .timedOut {

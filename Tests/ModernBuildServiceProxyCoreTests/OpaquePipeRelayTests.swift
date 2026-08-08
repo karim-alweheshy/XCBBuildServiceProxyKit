@@ -102,6 +102,46 @@ final class OpaquePipeRelayTests: XCTestCase {
     }
   }
 
+  func testAsynchronousCrossDirectionSinkFailureStopsRelayAndRemainsFirstError() throws {
+    let script = try TemporaryExecutable(
+      contents: "#!/bin/sh\ntrap '' TERM\n/bin/sleep 30 &\nwait\n"
+    )
+    defer { script.remove() }
+
+    let clientInput = Pipe()
+    try clientInput.fileHandleForWriting.write(
+      contentsOf: Data(makeTestFrame(channel: 1, payload: Array("CREATE_BUILD".utf8)))
+    )
+    try clientInput.fileHandleForWriting.close()
+    let readOnlyOutput = try XCTUnwrap(FileHandle(forReadingAtPath: "/dev/null"))
+    let interceptor = AsynchronousXcodeInjectionInterceptor()
+    let relay = OpaquePipeRelay(
+      executableURL: script.url,
+      environment: [:],
+      input: clientInput.fileHandleForReading,
+      output: readOnlyOutput,
+      errorOutput: FileHandle.nullDevice,
+      terminationGrace: 0.1,
+      frameInterceptor: interceptor
+    )
+
+    let started = Date()
+    XCTAssertThrowsError(try relay.run()) { error in
+      guard case OpaquePipeRelayError.relayFailed(let direction, _) = error else {
+        return XCTFail("Unexpected error: \(error)")
+      }
+      XCTAssertEqual(direction, "service-to-client")
+    }
+    XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+    XCTAssertEqual(interceptor.finished.wait(timeout: .now() + 2), .success)
+    XCTAssertEqual(interceptor.errorDescriptions.count, 2)
+    XCTAssertEqual(
+      interceptor.errorDescriptions.first,
+      interceptor.errorDescriptions.last,
+      "A later asynchronous send replaced the first latched sink failure"
+    )
+  }
+
   func testProxySignalHandlersAreInstalledOnlyAfterChildLaunch() throws {
     let script = try TemporaryExecutable(
       contents: "#!/bin/sh\n/bin/sleep 0.2\nkill -TERM $$\nprintf 'survived'\n"
@@ -131,6 +171,45 @@ final class OpaquePipeRelayTests: XCTestCase {
 
     XCTAssertNotEqual(summary.terminationStatus, 0)
     XCTAssertTrue(output.isEmpty)
+  }
+}
+
+private final class AsynchronousXcodeInjectionInterceptor: BuildServiceFrameInterceptor {
+  let finished = DispatchSemaphore(value: 0)
+  private let lock = NSLock()
+  private var errors: [String] = []
+
+  var errorDescriptions: [String] {
+    lock.withLock { errors }
+  }
+
+  func shouldIntercept(
+    direction: BuildServiceFrameDirection,
+    channel: UInt64,
+    payloadLength: UInt32,
+    messageName: String?
+  ) -> Bool {
+    direction == .clientToService
+  }
+
+  func intercept(
+    direction: BuildServiceFrameDirection,
+    frame: BuildServiceRawFrame,
+    outputs: BuildServiceFrameOutputs
+  ) throws -> Bool {
+    DispatchQueue.global(qos: .userInitiated).async {
+      defer { self.finished.signal() }
+      for marker in [UInt8(1), UInt8(2)] {
+        do {
+          try outputs.sendToXcode(
+            BuildServiceRawFrame(channel: frame.channel, payload: [marker])
+          )
+        } catch {
+          self.lock.withLock { self.errors.append(error.localizedDescription) }
+        }
+      }
+    }
+    return true
   }
 }
 

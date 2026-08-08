@@ -5,6 +5,37 @@ import XCTest
 @testable import ModernBuildServiceProxyCore
 
 final class BuildServiceFrameRelayTests: XCTestCase {
+  func testClientToServiceInterceptionCanConsumeAndInjectToXcode() throws {
+    let createPayload = Array("CREATE_BUILD".utf8)
+    let originalBytes = makeFrame(channel: 71, payload: createPayload)
+    let injected = BuildServiceRawFrame(
+      channel: 71,
+      payload: Array("BUILD_CREATED".utf8)
+    )
+    let nativeWriter = ShortWriter(maximumWriteLength: 1)
+    let xcodeWriter = ShortWriter(maximumWriteLength: 1)
+    let toNative = SerializedFrameSink(writer: nativeWriter)
+    let toXcode = SerializedFrameSink(writer: xcodeWriter)
+    let outputs = BuildServiceFrameOutputs(
+      sendToNative: toNative.send,
+      sendToXcode: toXcode.send
+    )
+
+    let summary = try BuildServiceFramePump(
+      direction: .clientToService,
+      reader: FragmentedReader(bytes: originalBytes, fragmentSizes: [1, 2, 3]),
+      sink: toNative,
+      recorder: nil,
+      interceptor: CrossDirectionInterceptor(injected: injected),
+      outputs: outputs
+    ).run()
+
+    XCTAssertTrue(nativeWriter.bytes.isEmpty)
+    XCTAssertEqual(xcodeWriter.bytes, injected.header + injected.payload)
+    XCTAssertEqual(summary.frameCount, 1)
+    XCTAssertEqual(summary.byteCount, UInt64(originalBytes.count))
+  }
+
   func testInterceptorInjectsOnHeldChannelThenForwardsOriginalFrameByteIdentically() throws {
     let createName = Array("CREATE_BUILD".utf8)
     let noncanonicalPayload =
@@ -14,14 +45,20 @@ final class BuildServiceFrameRelayTests: XCTestCase {
     let injectedPayload = Array("injected-probe-request".utf8)
     let reader = FragmentedReader(bytes: originalBytes, fragmentSizes: [1, 3, 2, 7, 5])
     let writer = ShortWriter(maximumWriteLength: 4)
+    let sink = SerializedFrameSink(writer: writer)
+    let outputs = BuildServiceFrameOutputs(
+      sendToNative: sink.send,
+      sendToXcode: { _ in XCTFail("Unexpected Xcode-bound injection") }
+    )
     let interceptor = InjectThenForwardInterceptor(injectedPayload: injectedPayload)
 
     let summary = try BuildServiceFramePump(
       direction: .clientToService,
       reader: reader,
-      writer: writer,
+      sink: sink,
       recorder: nil,
-      interceptor: interceptor
+      interceptor: interceptor,
+      outputs: outputs
     ).run()
 
     XCTAssertEqual(interceptor.observedFrame?.header, Array(originalBytes.prefix(12)))
@@ -51,6 +88,7 @@ final class BuildServiceFrameRelayTests: XCTestCase {
       fragmentSizes: [1, 2, 4, 3, 7, 5, 11]
     )
     let writer = ShortWriter(maximumWriteLength: 3)
+    let sink = SerializedFrameSink(writer: writer)
     let fixture = try MetadataFixture()
     defer { fixture.remove() }
     let recorder = try BuildServiceFrameMetadataRecorder(fileURL: fixture.fileURL)
@@ -58,7 +96,7 @@ final class BuildServiceFrameRelayTests: XCTestCase {
     let summary = try BuildServiceFramePump(
       direction: .clientToService,
       reader: reader,
-      writer: writer,
+      sink: sink,
       recorder: recorder
     ).run()
 
@@ -98,12 +136,13 @@ final class BuildServiceFrameRelayTests: XCTestCase {
   func testRejectsTruncatedHeaderWithoutForwarding() {
     let reader = FragmentedReader(bytes: Array(repeating: 0, count: 11), fragmentSizes: [4, 7])
     let writer = ShortWriter(maximumWriteLength: 2)
+    let sink = SerializedFrameSink(writer: writer)
 
     XCTAssertThrowsError(
       try BuildServiceFramePump(
         direction: .clientToService,
         reader: reader,
-        writer: writer,
+        sink: sink,
         recorder: nil
       ).run()
     ) { error in
@@ -120,12 +159,13 @@ final class BuildServiceFrameRelayTests: XCTestCase {
     let bytes = makeHeader(channel: 42, payloadLength: oversize)
     let reader = FragmentedReader(bytes: bytes, fragmentSizes: [12])
     let writer = ShortWriter(maximumWriteLength: 12)
+    let sink = SerializedFrameSink(writer: writer)
 
     XCTAssertThrowsError(
       try BuildServiceFramePump(
         direction: .serviceToClient,
         reader: reader,
-        writer: writer,
+        sink: sink,
         recorder: nil
       ).run()
     ) { error in
@@ -140,6 +180,7 @@ final class BuildServiceFrameRelayTests: XCTestCase {
     let bytes = makeHeader(channel: 7, payloadLength: declaredLength) + [0xA1, 0x58, 0x01]
     let reader = FragmentedReader(bytes: bytes, fragmentSizes: [12, 2, 1])
     let writer = ShortWriter(maximumWriteLength: 4)
+    let sink = SerializedFrameSink(writer: writer)
     let fixture = try MetadataFixture()
     defer { fixture.remove() }
     let recorder = try BuildServiceFrameMetadataRecorder(fileURL: fixture.fileURL)
@@ -148,7 +189,7 @@ final class BuildServiceFrameRelayTests: XCTestCase {
       try BuildServiceFramePump(
         direction: .serviceToClient,
         reader: reader,
-        writer: writer,
+        sink: sink,
         recorder: recorder
       ).run()
     ) { error in
@@ -174,6 +215,32 @@ final class BuildServiceFrameRelayTests: XCTestCase {
   }
 }
 
+private final class CrossDirectionInterceptor: BuildServiceFrameInterceptor {
+  let injected: BuildServiceRawFrame
+
+  init(injected: BuildServiceRawFrame) {
+    self.injected = injected
+  }
+
+  func shouldIntercept(
+    direction: BuildServiceFrameDirection,
+    channel: UInt64,
+    payloadLength: UInt32,
+    messageName: String?
+  ) -> Bool {
+    direction == .clientToService
+  }
+
+  func intercept(
+    direction: BuildServiceFrameDirection,
+    frame: BuildServiceRawFrame,
+    outputs: BuildServiceFrameOutputs
+  ) throws -> Bool {
+    try outputs.sendToXcode(injected)
+    return true
+  }
+}
+
 private final class InjectThenForwardInterceptor: BuildServiceFrameInterceptor {
   let injectedPayload: [UInt8]
   private(set) var observedFrame: BuildServiceRawFrame?
@@ -194,10 +261,12 @@ private final class InjectThenForwardInterceptor: BuildServiceFrameInterceptor {
   func intercept(
     direction: BuildServiceFrameDirection,
     frame: BuildServiceRawFrame,
-    send: (BuildServiceRawFrame) throws -> Void
+    outputs: BuildServiceFrameOutputs
   ) throws -> Bool {
     observedFrame = frame
-    try send(BuildServiceRawFrame(channel: frame.channel, payload: injectedPayload))
+    try outputs.sendToNative(
+      BuildServiceRawFrame(channel: frame.channel, payload: injectedPayload)
+    )
     return false
   }
 }

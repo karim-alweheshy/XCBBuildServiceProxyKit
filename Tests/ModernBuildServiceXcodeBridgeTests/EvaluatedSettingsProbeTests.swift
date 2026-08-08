@@ -636,6 +636,23 @@ private func sha256(_ value: String) -> String {
   SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
 }
 
+extension EvaluatedSettingsProbe {
+  fileprivate func intercept(
+    direction: BuildServiceFrameDirection,
+    frame: BuildServiceRawFrame,
+    send: @escaping (BuildServiceRawFrame) throws -> Void
+  ) throws -> Bool {
+    try intercept(
+      direction: direction,
+      frame: frame,
+      outputs: BuildServiceFrameOutputs(
+        sendToNative: send,
+        sendToXcode: send
+      )
+    )
+  }
+}
+
 private final class ProbeFixture {
   let directoryURL: URL
   let manifestURL: URL

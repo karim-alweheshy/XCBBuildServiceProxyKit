@@ -127,11 +127,11 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
   public func intercept(
     direction: BuildServiceFrameDirection,
     frame: BuildServiceRawFrame,
-    send: (BuildServiceRawFrame) throws -> Void
+    outputs: BuildServiceFrameOutputs
   ) throws -> Bool {
     switch direction {
     case .clientToService:
-      handleCreateBuild(frame: frame, send: send)
+      handleCreateBuild(frame: frame, send: outputs.sendToNative)
       return false
     case .serviceToClient:
       return handleServiceFrame(frame)

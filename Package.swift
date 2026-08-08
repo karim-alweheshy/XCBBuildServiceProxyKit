@@ -56,7 +56,8 @@ let package = Package(
         .product(name: "SWBProtocol", package: "swift-build"),
         .product(name: "SWBUtil", package: "swift-build"),
       ],
-      path: "Tests/ModernBuildServiceXcodeBridgeTests"
+      path: "Tests/ModernBuildServiceXcodeBridgeTests",
+      resources: [.copy("Fixtures")]
     ),
     .testTarget(
       name: "BazelProxyCoreTests",

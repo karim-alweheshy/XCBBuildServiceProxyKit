@@ -12,14 +12,33 @@ enum SwiftBuildProtocolCodecError: Error, Equatable {
 
 enum SwiftBuildProtocolCodec {
   static func decodeCreateBuild(_ payload: [UInt8]) throws -> CreateBuildRequest {
-    let message = try decodeIPCMessage(payload)
-    guard let request = message.message as? CreateBuildRequest else {
-      throw SwiftBuildProtocolCodecError.unexpectedMessage(
-        expected: CreateBuildRequest.name,
-        actual: type(of: message.message).name
-      )
-    }
-    return request
+    try decode(payload, as: CreateBuildRequest.self)
+  }
+
+  static func decodeBuildStart(_ payload: [UInt8]) throws -> BuildStartRequest {
+    try decode(payload, as: BuildStartRequest.self)
+  }
+
+  static func decodeBuildCancel(_ payload: [UInt8]) throws -> BuildCancelRequest {
+    try decode(payload, as: BuildCancelRequest.self)
+  }
+
+  static func decodeDeleteSession(_ payload: [UInt8]) throws -> DeleteSessionRequest {
+    try decode(payload, as: DeleteSessionRequest.self)
+  }
+
+  static func decodeBuildCreated(_ payload: [UInt8]) throws -> BuildCreated {
+    try decode(payload, as: BuildCreated.self)
+  }
+
+  static func decodeErrorResponse(_ payload: [UInt8]) throws -> ErrorResponse {
+    try decode(payload, as: ErrorResponse.self)
+  }
+
+  static func decodeBuildOperationEnded(_ payload: [UInt8]) throws
+    -> BuildOperationEnded
+  {
+    try decode(payload, as: BuildOperationEnded.self)
   }
 
   static func encodeAllExportedMacrosAndValuesRequest(
@@ -59,5 +78,16 @@ enum SwiftBuildProtocolCodec {
 
   static func decodeIPCMessage(_ payload: [UInt8]) throws -> IPCMessage {
     try IPCMessage(from: MsgPackDeserializer(payload[...]))
+  }
+
+  private static func decode<T: Message>(_ payload: [UInt8], as type: T.Type) throws -> T {
+    let message = try decodeIPCMessage(payload)
+    guard let value = message.message as? T else {
+      throw SwiftBuildProtocolCodecError.unexpectedMessage(
+        expected: type.name,
+        actual: Swift.type(of: message.message).name
+      )
+    }
+    return value
   }
 }
