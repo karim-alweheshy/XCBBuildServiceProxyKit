@@ -77,6 +77,14 @@ public struct BazelOperationExecutionResult: Equatable, Sendable {
   }
 }
 
+public protocol BazelOperationExecuting: Sendable {
+  func execute(
+    plan: ResolvedBuildPlan,
+    processEnvironment: [String: String],
+    onEvent: @escaping @Sendable (BazelOperationExecutionEvent) async throws -> Void
+  ) async -> BazelOperationExecutionResult
+}
+
 /// Executes one already-resolved Bazel operation without importing Swift Build protocol types.
 ///
 /// The caller owns protocol lifecycle and exactly-once terminalization. Cancelling the task that
@@ -106,8 +114,13 @@ public struct BazelOperationExecutor: Sendable {
     processEnvironment: [String: String] = ProcessInfo.processInfo.environment,
     onEvent: @escaping EventHandler = { _ in }
   ) async -> BazelOperationExecutionResult {
+    let mutationCancellationGate = ProductMutationCancellationGate()
     if case .clean = plan.intent.action {
-      return executeClean(plan: plan)
+      return await withTaskCancellationHandler {
+        executeClean(plan: plan, cancellationGate: mutationCancellationGate)
+      } onCancel: {
+        mutationCancellationGate.requestCancellation()
+      }
     }
     guard !Task.isCancelled else {
       return BazelOperationExecutionResult(status: .cancelled)
@@ -272,7 +285,10 @@ public struct BazelOperationExecutor: Sendable {
       }
 
       do {
-        let productReceipt = try materializer.materialize(plan: plan)
+        let productReceipt = try materializer.materialize(
+          plan: plan,
+          cancellationGate: mutationCancellationGate
+        )
         return BazelOperationExecutionResult(
           bep: bep,
           invocationReceipt: receipt,
@@ -280,6 +296,14 @@ public struct BazelOperationExecutor: Sendable {
           processCompletion: completion,
           productReceipt: productReceipt,
           status: .succeeded
+        )
+      } catch ProductMutationCancellationError.cancelledBeforeCommit {
+        return BazelOperationExecutionResult(
+          bep: bep,
+          invocationReceipt: receipt,
+          operationDirectoryURL: invocation.operationDirectoryURL,
+          processCompletion: completion,
+          status: .cancelled
         )
       } catch {
         return failed(
@@ -292,19 +316,28 @@ public struct BazelOperationExecutor: Sendable {
         )
       }
     } onCancel: {
+      mutationCancellationGate.requestCancellation()
       Task {
         _ = await process.cancel(gracePeriod: grace)
       }
     }
   }
 
-  private func executeClean(plan: ResolvedBuildPlan) -> BazelOperationExecutionResult {
+  private func executeClean(
+    plan: ResolvedBuildPlan,
+    cancellationGate: ProductMutationCancellationGate
+  ) -> BazelOperationExecutionResult {
     guard !Task.isCancelled else {
       return BazelOperationExecutionResult(status: .cancelled)
     }
     do {
-      let receipt = try materializer.clean(plan: plan)
+      let receipt = try materializer.clean(
+        plan: plan,
+        cancellationGate: cancellationGate
+      )
       return BazelOperationExecutionResult(cleanReceipt: receipt, status: .succeeded)
+    } catch ProductMutationCancellationError.cancelledBeforeCommit {
+      return BazelOperationExecutionResult(status: .cancelled)
     } catch {
       return failed(.clean, error)
     }
@@ -340,3 +373,5 @@ public struct BazelOperationExecutor: Sendable {
     }
   }
 }
+
+extension BazelOperationExecutor: BazelOperationExecuting {}

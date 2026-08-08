@@ -72,6 +72,24 @@ public struct ProcessCompletion: Equatable, Sendable {
   public let outputDisposition: ProcessOutputDisposition
   public let termination: ProcessTermination
 
+  public init(
+    cancellationRequested: Bool,
+    processGroupID: pid_t,
+    processIdentifier: pid_t,
+    standardErrorBytes: Int,
+    standardOutputBytes: Int,
+    outputDisposition: ProcessOutputDisposition,
+    termination: ProcessTermination
+  ) {
+    self.cancellationRequested = cancellationRequested
+    self.processGroupID = processGroupID
+    self.processIdentifier = processIdentifier
+    self.standardErrorBytes = standardErrorBytes
+    self.standardOutputBytes = standardOutputBytes
+    self.outputDisposition = outputDisposition
+    self.termination = termination
+  }
+
   public var succeeded: Bool {
     termination == .exited(status: 0) && outputDisposition == .complete
   }

@@ -69,6 +69,27 @@ final class ResolvedBuildPlanBuilderTests: XCTestCase {
     XCTAssertEqual(productPaths.fullProductName, "App.app")
   }
 
+  func testConfiguredTargetGUIDMayDifferFromManifestPBXTargetGUID() throws {
+    let fixture = try PlanBuilderFixture()
+    let configuredTargetGUID = "PIF_APP_GUID"
+    let request = makeCreateBuildRequest(
+      targets: [ConfiguredTargetMessagePayload(guid: configuredTargetGUID, parameters: nil)],
+      parameters: planParameters(platform: "iphonesimulator")
+    )
+
+    let decision = fixture.resolve(
+      request: request,
+      snapshots: [fixture.snapshot(targetGUID: configuredTargetGUID)]
+    )
+
+    guard case .intercept(let plan) = decision else {
+      return XCTFail("Expected interception, got \(decision)")
+    }
+    XCTAssertEqual(plan.intent.requestedTargets.first?.xcodeTargetGUID, configuredTargetGUID)
+    XCTAssertEqual(plan.targets.first?.mapping.xcodeTargetGUID, "APP_GUID")
+    XCTAssertEqual(plan.targets.first?.mapping.targetID, "app-app")
+  }
+
   func testCleanNeverRequestsAdapterTargetsOrOutputGroups() throws {
     let fixture = try PlanBuilderFixture()
     let request = makeCreateBuildRequest(
@@ -340,7 +361,10 @@ final class ResolvedBuildPlanBuilderTests: XCTestCase {
       ]
     )
 
-    XCTAssertEqual(decision, .reject(.targetIdentityMismatch(targetGUID: "APP_GUID")))
+    XCTAssertEqual(
+      decision,
+      .reject(.targetIdentityMismatch(targetGUID: "APP_GUID", field: "BAZEL_LABEL"))
+    )
   }
 
   func testAmbiguousImplicitMappingRejects() throws {
@@ -449,7 +473,7 @@ final class ResolvedBuildPlanBuilderTests: XCTestCase {
   }
 }
 
-private final class PlanBuilderFixture {
+final class PlanBuilderFixture {
   let bazelOutputURL: URL
   let environmentKeys = [
     "ACTION",

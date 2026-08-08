@@ -58,6 +58,17 @@ enum SwiftBuildProtocolCodec {
     _ payload: [UInt8],
     selecting keys: [String]
   ) throws -> [String] {
+    let selected = try decodeAllExportedMacrosAndValuesResponseDictionary(
+      payload,
+      selecting: keys
+    )
+    return keys.map { selected[$0] ?? "" }
+  }
+
+  static func decodeAllExportedMacrosAndValuesResponseDictionary(
+    _ payload: [UInt8],
+    selecting keys: [String]
+  ) throws -> [String: String] {
     let message = try decodeIPCMessage(payload)
     guard let response = message.message as? AllExportedMacrosAndValuesResponse else {
       throw SwiftBuildProtocolCodecError.unexpectedMessage(
@@ -67,7 +78,7 @@ enum SwiftBuildProtocolCodec {
     }
     // Project immediately onto the allowlist so the complete shell environment
     // cannot escape the protocol query boundary.
-    return keys.map { response.result[$0] ?? "" }
+    return Dictionary(uniqueKeysWithValues: keys.map { ($0, response.result[$0] ?? "") })
   }
 
   static func encode(_ message: any Message) -> [UInt8] {

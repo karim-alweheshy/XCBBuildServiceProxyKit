@@ -47,6 +47,7 @@ public final class OpaquePipeRelay {
   private let frameInterceptor: (any BuildServiceFrameInterceptor)?
   private let lock = NSLock()
   private var process: Process?
+  private var relayClosing = false
   private var stopRequested = false
 
   public init(
@@ -114,12 +115,20 @@ public final class OpaquePipeRelay {
       guard failureLatch.record(failure) else { return }
       self?.requestStop()
     }
+    let xcodeReader = FileDescriptorFrameReader(descriptor: input.fileDescriptor)
+    let nativeReader = FileDescriptorFrameReader(
+      descriptor: childOutput.fileHandleForReading.fileDescriptor
+    )
+    let nativeWriter = FileDescriptorFrameWriter(
+      descriptor: childInput.fileHandleForWriting.fileDescriptor
+    )
+    let xcodeWriter = FileDescriptorFrameWriter(descriptor: output.fileDescriptor)
     let toNative = SerializedFrameSink(
-      writer: FileDescriptorFrameWriter(
-        descriptor: childInput.fileHandleForWriting.fileDescriptor
-      ),
+      writer: nativeWriter,
       onFirstFailure: { [weak self] error in
-        guard let self, !self.isStopRequested else { return }
+        guard let self, !self.isStopRequested, !self.isRelayClosing,
+          error as? BuildServiceFrameOutputsError != .relayClosed
+        else { return }
         recordFailure(
           .relayFailed(
             direction: "client-to-service",
@@ -129,9 +138,11 @@ public final class OpaquePipeRelay {
       }
     )
     let toXcode = SerializedFrameSink(
-      writer: FileDescriptorFrameWriter(descriptor: output.fileDescriptor),
+      writer: xcodeWriter,
       onFirstFailure: { [weak self] error in
-        guard let self, !self.isStopRequested else { return }
+        guard let self, !self.isStopRequested, !self.isRelayClosing,
+          error as? BuildServiceFrameOutputsError != .relayClosed
+        else { return }
         recordFailure(
           .relayFailed(
             direction: "service-to-client",
@@ -148,13 +159,16 @@ public final class OpaquePipeRelay {
     copyGroup.enter()
     DispatchQueue.global(qos: .userInitiated).async {
       defer {
+        outputs.closeNative()
+        nativeWriter.invalidate()
+        _ = outputs.closeNativeAndWait(timeout: self.terminationGrace)
         try? childInput.fileHandleForWriting.close()
         copyGroup.leave()
       }
       do {
         let summary = try BuildServiceFramePump(
           direction: .clientToService,
-          reader: FileDescriptorFrameReader(descriptor: self.input.fileDescriptor),
+          reader: xcodeReader,
           sink: toNative,
           recorder: self.metadataRecorder,
           interceptor: self.frameInterceptor,
@@ -162,7 +176,9 @@ public final class OpaquePipeRelay {
         ).run()
         countLock.withLock { clientToServiceBytes = summary.byteCount }
       } catch {
-        if !self.isStopRequested {
+        if !self.isStopRequested, !self.isRelayClosing,
+          error as? BuildServiceFrameOutputsError != .relayClosed
+        {
           recordFailure(
             .relayFailed(
               direction: "client-to-service",
@@ -179,8 +195,7 @@ public final class OpaquePipeRelay {
       do {
         let summary = try BuildServiceFramePump(
           direction: .serviceToClient,
-          reader: FileDescriptorFrameReader(
-            descriptor: childOutput.fileHandleForReading.fileDescriptor),
+          reader: nativeReader,
           sink: toXcode,
           recorder: self.metadataRecorder,
           interceptor: self.frameInterceptor,
@@ -188,7 +203,9 @@ public final class OpaquePipeRelay {
         ).run()
         countLock.withLock { serviceToClientBytes = summary.byteCount }
       } catch {
-        if !self.isStopRequested {
+        if !self.isStopRequested, !self.isRelayClosing,
+          error as? BuildServiceFrameOutputsError != .relayClosed
+        {
           recordFailure(
             .relayFailed(
               direction: "service-to-client",
@@ -200,9 +217,37 @@ public final class OpaquePipeRelay {
     }
 
     child.waitUntilExit()
-    try? childInput.fileHandleForWriting.close()
-    let copyResult = copyGroup.wait(timeout: .now() + terminationGrace)
-    lock.withLock { process = nil }
+    lock.withLock {
+      relayClosing = true
+      process = nil
+    }
+    frameInterceptor?.buildServiceRelayWillClose()
+    outputs.closeNative()
+    nativeWriter.invalidate()
+    xcodeReader.invalidate()
+    var interceptorQuiesced =
+      frameInterceptor?.buildServiceRelayWaitForQuiescence(
+        timeout: terminationGrace
+      ) ?? true
+    var copyResult = copyGroup.wait(timeout: .now() + terminationGrace)
+    if copyResult == .timedOut {
+      outputs.closeAll()
+      nativeReader.invalidate()
+      xcodeReader.invalidate()
+      nativeWriter.invalidate()
+      xcodeWriter.invalidate()
+      copyResult = copyGroup.wait(timeout: .now() + terminationGrace)
+    }
+    outputs.closeAll()
+    nativeWriter.invalidate()
+    xcodeWriter.invalidate()
+    let outputsQuiesced = outputs.closeAndWait(timeout: terminationGrace)
+    if !interceptorQuiesced {
+      interceptorQuiesced =
+        frameInterceptor?.buildServiceRelayWaitForQuiescence(
+          timeout: terminationGrace
+        ) ?? true
+    }
 
     if let relayError = failureLatch.first {
       throw relayError
@@ -211,6 +256,18 @@ public final class OpaquePipeRelay {
       throw OpaquePipeRelayError.relayFailed(
         direction: "shutdown",
         underlying: "a relay direction did not drain within the bounded grace period"
+      )
+    }
+    if !outputsQuiesced {
+      throw OpaquePipeRelayError.relayFailed(
+        direction: "shutdown",
+        underlying: "asynchronous output sends did not stop within the bounded grace period"
+      )
+    }
+    if !interceptorQuiesced {
+      throw OpaquePipeRelayError.relayFailed(
+        direction: "shutdown",
+        underlying: "asynchronous interception work did not quiesce within the bounded grace period"
       )
     }
 
@@ -226,7 +283,6 @@ public final class OpaquePipeRelay {
       stopRequested = true
       return process?.processIdentifier
     }
-    try? input.close()
     guard let childPID else { return }
 
     kill(-childPID, SIGTERM)
@@ -248,6 +304,10 @@ public final class OpaquePipeRelay {
 
   private var isStopRequested: Bool {
     lock.withLock { stopRequested }
+  }
+
+  private var isRelayClosing: Bool {
+    lock.withLock { relayClosing }
   }
 }
 

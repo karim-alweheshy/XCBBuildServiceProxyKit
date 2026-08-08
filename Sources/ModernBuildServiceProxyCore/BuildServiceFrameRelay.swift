@@ -134,15 +134,44 @@ protocol FrameByteWriter: AnyObject {
 
 final class FileDescriptorFrameReader: FrameByteReader {
   private let descriptor: Int32
+  private let lock = NSLock()
+  private var isOpen = true
 
   init(descriptor: Int32) {
     self.descriptor = descriptor
+    Self.makeNonblocking(descriptor)
+  }
+
+  func invalidate() {
+    lock.withLock { isOpen = false }
   }
 
   func read(into buffer: UnsafeMutableRawBufferPointer) throws -> Int {
     while true {
+      guard lock.withLock({ isOpen }) else {
+        throw BuildServiceFrameOutputsError.relayClosed
+      }
       let count = Darwin.read(descriptor, buffer.baseAddress, buffer.count)
       if count >= 0 { return count }
+      if errno == EINTR { continue }
+      if errno == EAGAIN || errno == EWOULDBLOCK {
+        try Self.waitForReadiness(descriptor: descriptor, events: Int16(POLLIN))
+        continue
+      }
+      throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+  }
+
+  private static func makeNonblocking(_ descriptor: Int32) {
+    let flags = fcntl(descriptor, F_GETFL)
+    if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+  }
+
+  fileprivate static func waitForReadiness(descriptor: Int32, events: Int16) throws {
+    var descriptorState = pollfd(fd: descriptor, events: events, revents: 0)
+    while true {
+      let result = Darwin.poll(&descriptorState, 1, 50)
+      if result >= 0 { return }
       if errno == EINTR { continue }
       throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
@@ -151,17 +180,35 @@ final class FileDescriptorFrameReader: FrameByteReader {
 
 final class FileDescriptorFrameWriter: FrameByteWriter {
   private let descriptor: Int32
+  private let lock = NSLock()
+  private var isOpen = true
 
   init(descriptor: Int32) {
     self.descriptor = descriptor
     _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
+    let flags = fcntl(descriptor, F_GETFL)
+    if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+  }
+
+  func invalidate() {
+    lock.withLock { isOpen = false }
   }
 
   func write(_ buffer: UnsafeRawBufferPointer) throws -> Int {
     while true {
+      guard lock.withLock({ isOpen }) else {
+        throw BuildServiceFrameOutputsError.relayClosed
+      }
       let count = Darwin.write(descriptor, buffer.baseAddress, buffer.count)
       if count >= 0 { return count }
       if errno == EINTR { continue }
+      if errno == EAGAIN || errno == EWOULDBLOCK {
+        try FileDescriptorFrameReader.waitForReadiness(
+          descriptor: descriptor,
+          events: Int16(POLLOUT)
+        )
+        continue
+      }
       throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
   }
@@ -315,7 +362,7 @@ final class BuildServiceFramePump {
       )
       var discardOversizeInterceptedFrame = false
       if shouldIntercept, payloadLength > Self.maximumInterceptedPayloadLength {
-        discardOversizeInterceptedFrame = interceptor.interceptionDidFail(
+        discardOversizeInterceptedFrame = try interceptor.interceptionDidFail(
           direction: direction,
           channel: channel,
           messageName: messageName,
