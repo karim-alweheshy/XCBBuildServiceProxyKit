@@ -44,6 +44,7 @@ public final class OpaquePipeRelay {
   private let errorOutput: FileHandle
   private let terminationGrace: TimeInterval
   private let metadataRecorder: BuildServiceFrameMetadataRecorder?
+  private let frameInterceptor: (any BuildServiceFrameInterceptor)?
   private let lock = NSLock()
   private var process: Process?
   private var stopRequested = false
@@ -55,7 +56,8 @@ public final class OpaquePipeRelay {
     output: FileHandle = .standardOutput,
     errorOutput: FileHandle = .standardError,
     terminationGrace: TimeInterval = 2,
-    metadataRecorder: BuildServiceFrameMetadataRecorder? = nil
+    metadataRecorder: BuildServiceFrameMetadataRecorder? = nil,
+    frameInterceptor: (any BuildServiceFrameInterceptor)? = nil
   ) {
     self.executableURL = executableURL
     self.environment = environment
@@ -64,6 +66,7 @@ public final class OpaquePipeRelay {
     self.errorOutput = errorOutput
     self.terminationGrace = terminationGrace
     self.metadataRecorder = metadataRecorder
+    self.frameInterceptor = frameInterceptor
   }
 
   public func run(onProcessStarted: (() -> Void)? = nil) throws -> Summary {
@@ -119,7 +122,8 @@ public final class OpaquePipeRelay {
           reader: FileDescriptorFrameReader(descriptor: self.input.fileDescriptor),
           writer: FileDescriptorFrameWriter(
             descriptor: childInput.fileHandleForWriting.fileDescriptor),
-          recorder: self.metadataRecorder
+          recorder: self.metadataRecorder,
+          interceptor: self.frameInterceptor
         ).run()
         countLock.withLock { clientToServiceBytes = summary.byteCount }
       } catch {
@@ -144,7 +148,8 @@ public final class OpaquePipeRelay {
           reader: FileDescriptorFrameReader(
             descriptor: childOutput.fileHandleForReading.fileDescriptor),
           writer: FileDescriptorFrameWriter(descriptor: self.output.fileDescriptor),
-          recorder: self.metadataRecorder
+          recorder: self.metadataRecorder,
+          interceptor: self.frameInterceptor
         ).run()
         countLock.withLock { serviceToClientBytes = summary.byteCount }
       } catch {

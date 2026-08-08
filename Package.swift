@@ -4,11 +4,17 @@ import PackageDescription
 
 let package = Package(
   name: "XCBBuildServiceProxyKit",
-  platforms: [.macOS(.v14)],
+  platforms: [.macOS(.v15)],
   products: [
     .executable(
       name: "ModernBuildServiceProxy",
       targets: ["ModernBuildServiceProxy"]
+    )
+  ],
+  dependencies: [
+    .package(
+      url: "https://github.com/swiftlang/swift-build.git",
+      revision: "e4f6fc77ebe727657dadfedf50462f5a1a626ead"
     )
   ],
   targets: [
@@ -16,15 +22,33 @@ let package = Package(
       name: "ModernBuildServiceProxyCore",
       path: "Sources/ModernBuildServiceProxyCore"
     ),
+    .target(
+      name: "ModernBuildServiceXcodeBridge",
+      dependencies: [
+        "ModernBuildServiceProxyCore",
+        .product(name: "SWBProtocol", package: "swift-build"),
+        .product(name: "SWBUtil", package: "swift-build"),
+      ],
+      path: "Sources/ModernBuildServiceXcodeBridge"
+    ),
     .executableTarget(
       name: "ModernBuildServiceProxy",
-      dependencies: ["ModernBuildServiceProxyCore"],
+      dependencies: ["ModernBuildServiceProxyCore", "ModernBuildServiceXcodeBridge"],
       path: "Sources/ModernBuildServiceProxy"
     ),
     .testTarget(
       name: "ModernBuildServiceProxyCoreTests",
       dependencies: ["ModernBuildServiceProxyCore"],
       path: "Tests/ModernBuildServiceProxyCoreTests"
+    ),
+    .testTarget(
+      name: "ModernBuildServiceXcodeBridgeTests",
+      dependencies: [
+        "ModernBuildServiceXcodeBridge",
+        .product(name: "SWBProtocol", package: "swift-build"),
+        .product(name: "SWBUtil", package: "swift-build"),
+      ],
+      path: "Tests/ModernBuildServiceXcodeBridgeTests"
     ),
   ],
   swiftLanguageModes: [.v5]
