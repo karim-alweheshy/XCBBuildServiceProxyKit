@@ -1,3 +1,5 @@
+import CryptoKit
+import Darwin
 import Foundation
 
 public struct BuildProxyManifestExpectation: Equatable, Sendable {
@@ -10,8 +12,40 @@ public struct BuildProxyManifestExpectation: Equatable, Sendable {
   }
 }
 
+extension Digest {
+  fileprivate var hexadecimalString: String {
+    map { String(format: "%02x", $0) }.joined()
+  }
+}
+
+public struct BuildProxyManifestFileIdentity: Equatable, Sendable {
+  public let algorithm: String
+  public let byteSize: UInt64
+  public let hex: String
+
+  public init(algorithm: String, byteSize: UInt64, hex: String) {
+    self.algorithm = algorithm
+    self.byteSize = byteSize
+    self.hex = hex
+  }
+}
+
+public struct VerifiedBuildProxyManifest: Equatable, Sendable {
+  public let manifest: BuildProxyManifest
+  public let fileIdentity: BuildProxyManifestFileIdentity
+
+  public init(
+    manifest: BuildProxyManifest,
+    fileIdentity: BuildProxyManifestFileIdentity
+  ) {
+    self.manifest = manifest
+    self.fileIdentity = fileIdentity
+  }
+}
+
 public enum BuildProxyManifestError: LocalizedError, Equatable, Sendable {
   case invalidJSON(String)
+  case invalidExpectedSHA256(String)
   case invalidShape(String)
   case invalidContract(String)
   case unsupportedSchema(Int)
@@ -21,11 +55,14 @@ public enum BuildProxyManifestError: LocalizedError, Equatable, Sendable {
   case symbolicLink(String)
   case unreadableManifest(String)
   case sensitiveEnvironmentKey(String)
+  case sha256Mismatch(expected: String, actual: String)
 
   public var errorDescription: String? {
     switch self {
     case .invalidJSON(let description):
       return "The build proxy manifest is not valid JSON: \(description)"
+    case .invalidExpectedSHA256(let digest):
+      return "The expected build proxy manifest SHA-256 is invalid: \(digest)"
     case .invalidShape(let description):
       return "The build proxy manifest has an invalid shape: \(description)"
     case .invalidContract(let description):
@@ -44,6 +81,8 @@ public enum BuildProxyManifestError: LocalizedError, Equatable, Sendable {
       return "The build proxy manifest is missing or unreadable: \(path)"
     case .sensitiveEnvironmentKey(let key):
       return "The build proxy manifest declares a credential-shaped environment key: \(key)"
+    case .sha256Mismatch(let expected, let actual):
+      return "The build proxy manifest SHA-256 \(actual) does not match \(expected)."
     }
   }
 }
@@ -113,25 +152,54 @@ public struct BuildProxyManifest: Codable, Equatable, Sendable {
     expecting expectation: BuildProxyManifestExpectation,
     fileManager: FileManager = .default
   ) throws -> Self {
+    try loadVerified(
+      from: manifestURL,
+      expecting: expectation,
+      expectedSHA256: nil,
+      fileManager: fileManager
+    ).manifest
+  }
+
+  /// Reads, hashes, and decodes one descriptor-bound manifest snapshot.
+  ///
+  /// The launcher-provided digest is checked against the exact bytes passed to
+  /// JSON validation and decoding. The path is never reopened between identity
+  /// verification and consumption.
+  public static func loadVerified(
+    from manifestURL: URL,
+    expecting expectation: BuildProxyManifestExpectation,
+    expectedSHA256: String,
+    fileManager: FileManager = .default
+  ) throws -> VerifiedBuildProxyManifest {
+    try loadVerified(
+      from: manifestURL,
+      expecting: expectation,
+      expectedSHA256: Optional(expectedSHA256),
+      fileManager: fileManager
+    )
+  }
+
+  private static func loadVerified(
+    from manifestURL: URL,
+    expecting expectation: BuildProxyManifestExpectation,
+    expectedSHA256: String?,
+    fileManager: FileManager
+  ) throws -> VerifiedBuildProxyManifest {
     let securedURL = try secureManifestURL(
       manifestURL,
       projectContainerURL: expectation.projectContainerURL,
       fileManager: fileManager
     )
-    let data: Data
-    do {
-      let attributes = try fileManager.attributesOfItem(atPath: securedURL.path)
-      guard attributes[.type] as? FileAttributeType == .typeRegular,
-        let size = attributes[.size] as? NSNumber,
-        size.uint64Value <= 16 * 1024 * 1024
-      else {
-        throw BuildProxyManifestError.unreadableManifest(securedURL.path)
-      }
-      data = try Data(contentsOf: securedURL, options: [.mappedIfSafe])
-    } catch let error as BuildProxyManifestError {
-      throw error
-    } catch {
-      throw BuildProxyManifestError.unreadableManifest(securedURL.path)
+    if let expectedSHA256, !isSHA256Hex(expectedSHA256) {
+      throw BuildProxyManifestError.invalidExpectedSHA256(expectedSHA256)
+    }
+    let data = try readManifestSnapshot(from: securedURL)
+    let observedSHA256 = SHA256.hash(data: data).hexadecimalString
+    if let expectedSHA256, observedSHA256 != expectedSHA256 {
+      throw BuildProxyManifestError.sha256Mismatch(
+        expected: expectedSHA256,
+        actual: observedSHA256
+      )
     }
 
     try validateJSONShape(data)
@@ -143,7 +211,58 @@ public struct BuildProxyManifest: Codable, Equatable, Sendable {
       throw BuildProxyManifestError.invalidJSON(error.localizedDescription)
     }
     try manifest.validate(expectation: expectation)
-    return manifest
+    return VerifiedBuildProxyManifest(
+      manifest: manifest,
+      fileIdentity: BuildProxyManifestFileIdentity(
+        algorithm: "sha256",
+        byteSize: UInt64(data.count),
+        hex: observedSHA256
+      )
+    )
+  }
+
+  private static func readManifestSnapshot(from url: URL) throws -> Data {
+    let descriptor = url.path.withCString {
+      Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    }
+    guard descriptor >= 0 else {
+      throw BuildProxyManifestError.unreadableManifest(url.path)
+    }
+    defer { Darwin.close(descriptor) }
+
+    var fileStatus = stat()
+    let maximumByteCount = 16 * 1024 * 1024
+    guard fstat(descriptor, &fileStatus) == 0,
+      fileStatus.st_mode & S_IFMT == S_IFREG,
+      fileStatus.st_size >= 0,
+      fileStatus.st_size <= maximumByteCount
+    else {
+      throw BuildProxyManifestError.unreadableManifest(url.path)
+    }
+
+    var data = Data()
+    data.reserveCapacity(Int(fileStatus.st_size))
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while true {
+      let count = Darwin.read(descriptor, &buffer, buffer.count)
+      if count < 0 {
+        if errno == EINTR { continue }
+        throw BuildProxyManifestError.unreadableManifest(url.path)
+      }
+      if count == 0 { break }
+      guard data.count + count <= maximumByteCount else {
+        throw BuildProxyManifestError.unreadableManifest(url.path)
+      }
+      data.append(buffer, count: count)
+    }
+    return data
+  }
+
+  private static func isSHA256Hex(_ value: String) -> Bool {
+    value.utf8.count == 64
+      && value.utf8.allSatisfy {
+        ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+      }
   }
 
   private func validate(expectation: BuildProxyManifestExpectation) throws {

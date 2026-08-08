@@ -157,7 +157,11 @@ public enum InvocationReceiptValidator {
     try validateEnvironmentKeys(receipt.environmentKeys, plan: plan)
     try validateDictionary(receipt.modes, field: "modes")
     try validateDictionary(receipt.materialization, field: "materialization")
-    try validateModes(receipt.modes, plan: plan)
+    try validateModes(
+      receipt.modes,
+      commandOptions: receipt.commandOptions,
+      plan: plan
+    )
     return receipt
   }
 
@@ -348,16 +352,41 @@ public enum InvocationReceiptValidator {
 
   private static func validateModes(
     _ modes: [String: String],
+    commandOptions: [String],
     plan: ResolvedBuildPlan
   ) throws {
+    guard let expectedConfig = expectedBazelConfig(plan: plan) else {
+      throw InvocationReceiptError.bindingMismatch("build modes")
+    }
+    let configuredOptions = commandOptions.filter { $0.hasPrefix("--config=") }
     guard Set(modes.keys) == Set(["action", "config", "coverage", "previews"]),
       let expectedAction = plan.evaluatedEnvironment["ACTION"],
       modes["action"] == expectedAction,
+      modes["config"] == expectedConfig,
       modes["coverage"] == (plan.evaluatedEnvironment["CLANG_COVERAGE_MAPPING"] ?? "NO"),
-      modes["previews"] == (plan.evaluatedEnvironment["ENABLE_PREVIEWS"] ?? "NO")
+      modes["previews"] == (plan.evaluatedEnvironment["ENABLE_PREVIEWS"] ?? "NO"),
+      configuredOptions == ["--config=\(expectedConfig)"]
     else {
       throw InvocationReceiptError.bindingMismatch("build modes")
     }
+  }
+
+  private static func expectedBazelConfig(plan: ResolvedBuildPlan) -> String? {
+    guard let base = plan.evaluatedEnvironment["BAZEL_CONFIG"], !base.isEmpty else {
+      return nil
+    }
+    if plan.evaluatedEnvironment["ACTION"] == "indexbuild" {
+      return "\(base)_indexbuild"
+    }
+    if plan.evaluatedEnvironment["ENABLE_PREVIEWS"] == "YES" {
+      return "\(base)_swiftuipreviews"
+    }
+    if plan.evaluatedEnvironment["CLANG_COVERAGE_MAPPING"] == "YES",
+      plan.evaluatedEnvironment["BAZEL_SUPPRESS_COVERAGE_BUILD"] != "YES"
+    {
+      return "\(base)_coverage"
+    }
+    return "_\(base)_build"
   }
 
   private static func validateSafeText(_ value: String, field: String) throws {
