@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import ModernBuildServiceProxyCore
 import SWBProtocol
+import SWBUtil
 import XCTest
 
 @testable import ModernBuildServiceXcodeBridge
@@ -43,6 +44,32 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskEnded.name }.count, 2)
     XCTAssertTrue(eventNames.contains(BuildOperationConsoleOutputEmitted.name))
     XCTAssertTrue(eventNames.contains(BuildOperationProgressUpdated.name))
+    let actionStarted = try XCTUnwrap(
+      harness.xcodeFrames(on: 201)
+        .filter { $0.messageName == BuildOperationTaskStarted.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
+        .first { $0.id == 2 }
+    )
+    let actionEnded = try XCTUnwrap(
+      harness.xcodeFrames(on: 201)
+        .filter { $0.messageName == BuildOperationTaskEnded.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationTaskEnded.self) }
+        .first { $0.id == 2 }
+    )
+    XCTAssertNil(actionStarted.parentID)
+    XCTAssertEqual(actionStarted.info.taskName, "SwiftCompile")
+    XCTAssertEqual(actionStarted.info.executionDescription, "SwiftCompile")
+    XCTAssertEqual(actionStarted.info.ruleInfo, "SwiftCompile //app:App App.app")
+    XCTAssertEqual(
+      BuildOperationTaskSignature(rawValue: actionStarted.info.signature),
+      .taskIdentifier(
+        ByteString(encodingAsUTF8: "rules_xcodeproj.bazel.action.v1://app:App|App.app|debug")
+      )
+    )
+    XCTAssertEqual(
+      actionEnded.signature,
+      BuildOperationTaskSignature(rawValue: actionStarted.info.signature)
+    )
     let ended = try SwiftBuildProtocolCodec.decodeBuildOperationEnded(
       try XCTUnwrap(harness.xcodeFrames(on: 201).last).payload
     )
@@ -1288,7 +1315,18 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
         try await onEvent(
           .bep(.progress(ProxyProgress(completed: 1, source: .interactiveHint, total: 2))))
         try await onEvent(
-          .bep(.actionCompleted(identity: "//app:App|App.app|debug", succeeded: true))
+          .bep(
+            .actionCompleted(
+              BEPActionCompleted(
+                configuration: "debug",
+                identity: "//app:App|App.app|debug",
+                label: "//app:App",
+                mnemonic: "SwiftCompile",
+                primaryOutput: "App.app",
+                succeeded: true
+              )
+            )
+          )
         )
         try await onEvent(.bep(.reportedExecutedActionCount(1)))
         try await onEvent(.bep(.finished(succeeded: true)))

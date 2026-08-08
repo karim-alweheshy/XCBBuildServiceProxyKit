@@ -7,7 +7,7 @@ final class BEPStreamValidatorTests: XCTestCase {
   func testIncrementallyParsesAllowlistedEventsAndTerminalResult() throws {
     let lines = [
       #"{"progress":{"stderr":"[2 / 7] Compiling App.swift\n"}}"#,
-      #"{"id":{"actionCompleted":{"configuration":"sim-arm64","label":"//app:App","primaryOutput":"bazel-out/App.app"}},"action":{"success":true}}"#,
+      #"{"id":{"actionCompleted":{"configuration":"sim-arm64","label":"//app:App","primaryOutput":"bazel-out/App.app"}},"action":{"success":true,"type":"SwiftCompile"}}"#,
       #"{"id":{"targetCompleted":{"label":"//app:App"}},"completed":{"success":true}}"#,
       #"{"buildMetrics":{"actionSummary":{"actionsExecuted":"7"}}}"#,
       #"{"finished":{"overallSuccess":true}}"#,
@@ -29,6 +29,20 @@ final class BEPStreamValidatorTests: XCTestCase {
     )
     XCTAssertTrue(events.contains(.reportedExecutedActionCount(7)))
     XCTAssertTrue(events.contains(.finished(succeeded: true)))
+    XCTAssertTrue(
+      events.contains(
+        .actionCompleted(
+          BEPActionCompleted(
+            configuration: "sim-arm64",
+            identity: "//app:App|bazel-out/App.app|sim-arm64",
+            label: "//app:App",
+            mnemonic: "SwiftCompile",
+            primaryOutput: "bazel-out/App.app",
+            succeeded: true
+          )
+        )
+      )
+    )
     XCTAssertEqual(
       result.completedActionIDs,
       ["//app:App|bazel-out/App.app|sim-arm64"]

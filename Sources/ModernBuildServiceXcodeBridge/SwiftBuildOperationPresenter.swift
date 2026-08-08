@@ -159,7 +159,7 @@ enum SwiftBuildOperationPresenter {
   }
 
   static func encodeTaskStarted(_ task: SwiftBuildPresentedTask) -> [UInt8] {
-    let signature = taskSignature(task.stableSignature)
+    let signature = taskSignature(task.stableSignature, parentID: task.parentID)
     let info = BuildOperationTaskInfo(
       taskName: task.taskName,
       signature: signature,
@@ -232,12 +232,13 @@ enum SwiftBuildOperationPresenter {
     id: Int,
     stableSignature: String,
     status: SwiftBuildPresentedTaskStatus,
-    signalled: Bool
+    signalled: Bool,
+    parentID: Int? = nil
   ) -> [UInt8] {
     SwiftBuildProtocolCodec.encode(
       BuildOperationTaskEnded(
         id: id,
-        signature: taskSignature(stableSignature),
+        signature: taskSignature(stableSignature, parentID: parentID),
         status: status.protocolValue,
         signalled: signalled,
         metrics: nil
@@ -258,8 +259,12 @@ enum SwiftBuildOperationPresenter {
     )
   }
 
-  static func taskSignature(_ stableSignature: String) -> BuildOperationTaskSignature {
-    .taskIdentifier(ByteString(encodingAsUTF8: stableSignature))
+  static func taskSignature(
+    _ stableSignature: String,
+    parentID: Int? = nil
+  ) -> BuildOperationTaskSignature {
+    let bytes = ByteString(encodingAsUTF8: stableSignature)
+    return parentID == nil ? .taskIdentifier(bytes) : .subtaskSignature(bytes)
   }
 }
 

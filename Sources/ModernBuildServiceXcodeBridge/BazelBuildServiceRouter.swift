@@ -1340,7 +1340,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       return
     }
     var actionTaskID: Int?
-    if case .bep(.actionCompleted(_, let succeeded)) = event, succeeded != nil {
+    if case .bep(.actionCompleted(let action)) = event, action.succeeded != nil {
       actionTaskID = operation.presentation.nextTaskID
       operation.presentation.nextTaskID += 1
     }
@@ -1363,28 +1363,36 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       )
     case .bep(let event):
       switch event {
-      case .actionCompleted(let identity, let succeeded):
-        guard let succeeded else { return }
+      case .actionCompleted(let action):
+        guard let succeeded = action.succeeded else { return }
         guard let taskID = actionTaskID else { return }
-        let signature = "rules_xcodeproj.bazel.action.v1:\(identity)"
-        let label = identity.split(separator: "|", maxSplits: 1).first.map(String.init)
-        let targetID = label.flatMap { label in
-          operation.plan.targets.first { $0.mapping.bazelLabel == label }
+        let signature = "rules_xcodeproj.bazel.action.v1:\(action.identity)"
+        let label = action.label.isEmpty ? nil : action.label
+        let targetID = label.flatMap { actionLabel in
+          operation.plan.targets.first { $0.mapping.bazelLabel == actionLabel }
             .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
         }
+        let actionName = action.mnemonic ?? "Bazel action"
+        let ruleInfo = [
+          action.mnemonic,
+          label,
+          action.primaryOutput.isEmpty ? nil : action.primaryOutput,
+        ]
+        .compactMap { $0 }
+        .joined(separator: " ")
         try send(
           SwiftBuildOperationPresenter.encodeTaskStarted(
             SwiftBuildPresentedTask(
               commandLineDisplayString: nil,
-              executionDescription: "Bazel action",
+              executionDescription: actionName,
               id: taskID,
               interestingPath: nil,
-              parentID: operation.presentation.wrapperTaskID,
-              ruleInfo: "BazelAction \(label ?? "")",
+              parentID: nil,
+              ruleInfo: ruleInfo,
               serializedDiagnosticsPaths: [],
               stableSignature: signature,
               targetID: targetID,
-              taskName: "Bazel action"
+              taskName: actionName
             )
           ),
           channel: channel,

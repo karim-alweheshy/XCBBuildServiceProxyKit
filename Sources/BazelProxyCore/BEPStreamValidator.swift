@@ -1,12 +1,53 @@
 import Darwin
 import Foundation
 
+public struct BEPActionCompleted: Equatable, Sendable {
+  public let configuration: String
+  public let identity: String
+  public let label: String
+  public let mnemonic: String?
+  public let primaryOutput: String
+  public let succeeded: Bool?
+
+  public init(
+    configuration: String,
+    identity: String,
+    label: String,
+    mnemonic: String?,
+    primaryOutput: String,
+    succeeded: Bool?
+  ) {
+    self.configuration = configuration
+    self.identity = identity
+    self.label = label
+    self.mnemonic = mnemonic
+    self.primaryOutput = primaryOutput
+    self.succeeded = succeeded
+  }
+}
+
 public enum BEPEvent: Equatable, Sendable {
-  case actionCompleted(identity: String, succeeded: Bool?)
+  case actionCompleted(BEPActionCompleted)
   case progress(ProxyProgress)
   case reportedExecutedActionCount(Int)
   case targetCompleted(label: String, succeeded: Bool)
   case finished(succeeded: Bool)
+}
+
+extension BEPEvent {
+  public static func actionCompleted(identity: String, succeeded: Bool?) -> Self {
+    let components = identity.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+    return .actionCompleted(
+      BEPActionCompleted(
+        configuration: components.count > 2 ? String(components[2]) : "",
+        identity: identity,
+        label: components.first.map(String.init) ?? "",
+        mnemonic: nil,
+        primaryOutput: components.count > 1 ? String(components[1]) : "",
+        succeeded: succeeded
+      )
+    )
+  }
 }
 
 public struct BEPResult: Equatable, Sendable {
@@ -272,11 +313,24 @@ public struct BEPStreamValidator: Sendable {
       guard completedActionIDs.insert(identity).inserted else {
         throw BEPStreamError.duplicateActionIdentity(identity)
       }
-      let succeeded = (object["action"] as? [String: Any])?["success"] as? Bool
+      let payload = object["action"] as? [String: Any]
+      let succeeded = payload?["success"] as? Bool
       if succeeded == false {
         failedActionIDs.insert(identity)
       }
-      events.append(.actionCompleted(identity: identity, succeeded: succeeded))
+      let mnemonic = (payload?["type"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+      events.append(
+        .actionCompleted(
+          BEPActionCompleted(
+            configuration: configuration,
+            identity: identity,
+            label: label,
+            mnemonic: mnemonic,
+            primaryOutput: primaryOutput,
+            succeeded: succeeded
+          )
+        )
+      )
     }
 
     if let identifier = object["id"] as? [String: Any],

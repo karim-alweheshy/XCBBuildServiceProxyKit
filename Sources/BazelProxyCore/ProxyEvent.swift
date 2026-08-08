@@ -117,13 +117,13 @@ public enum DiagnosticParser {
 public enum ProxyEventProjection {
   public static func project(_ event: BEPEvent) -> [ProxyEvent] {
     switch event {
-    case .actionCompleted(let identity, let succeeded):
-      guard let succeeded else { return [] }
+    case .actionCompleted(let action):
+      guard let succeeded = action.succeeded else { return [] }
       return [
-        .lifecycle(.taskStarted(entityID: identity)),
+        .lifecycle(.taskStarted(entityID: action.identity)),
         .lifecycle(
           .taskEnded(
-            entityID: identity,
+            entityID: action.identity,
             status: succeeded ? .succeeded : .failed,
             signalled: false
           )
