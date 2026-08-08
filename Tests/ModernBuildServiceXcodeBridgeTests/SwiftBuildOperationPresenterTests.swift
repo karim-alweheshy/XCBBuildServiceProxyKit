@@ -150,6 +150,44 @@ final class SwiftBuildOperationPresenterTests: XCTestCase {
     XCTAssertEqual(task.info.serializedDiagnosticsPaths, [Path("/derived/app.dia")])
   }
 
+  func testPresenterUsesSubtaskSignatureForNestedTaskLifecycle() throws {
+    let signature = "rules_xcodeproj.bazel.action.v1://app:App|App.app|debug"
+    let task = SwiftBuildPresentedTask(
+      commandLineDisplayString: nil,
+      executionDescription: "SwiftCompile",
+      id: 2,
+      interestingPath: nil,
+      parentID: 1,
+      ruleInfo: "BazelAction //app:App",
+      serializedDiagnosticsPaths: [],
+      stableSignature: signature,
+      targetID: 1,
+      taskName: "SwiftCompile"
+    )
+
+    let started = try decode(
+      SwiftBuildOperationPresenter.encodeTaskStarted(task),
+      as: BuildOperationTaskStarted.self
+    )
+    let ended = try decode(
+      SwiftBuildOperationPresenter.encodeTaskEnded(
+        id: task.id,
+        stableSignature: signature,
+        status: .succeeded,
+        signalled: false,
+        parentID: task.parentID
+      ),
+      as: BuildOperationTaskEnded.self
+    )
+    let expected = BuildOperationTaskSignature.subtaskSignature(
+      ByteString(encodingAsUTF8: signature)
+    )
+
+    XCTAssertEqual(started.parentID, 1)
+    XCTAssertEqual(started.info.signature, expected.rawValue)
+    XCTAssertEqual(ended.signature, expected)
+  }
+
   func testPresenterConstructsProgress() throws {
     let progress = try decode(
       SwiftBuildOperationPresenter.encodeProgressUpdated(

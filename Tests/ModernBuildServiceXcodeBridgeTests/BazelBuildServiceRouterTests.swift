@@ -3,11 +3,48 @@ import Darwin
 import Foundation
 import ModernBuildServiceProxyCore
 import SWBProtocol
+import SWBUtil
 import XCTest
 
 @testable import ModernBuildServiceXcodeBridge
 
 final class BazelBuildServiceRouterTests: XCTestCase {
+  func testPresentsCacheAndWorkerActionDetailsWithCommands() throws {
+    let fixture = try PlanBuilderFixture()
+    let executor = RouterFakeExecutor(behavior: .succeedWithDetailedActions)
+    let harness = RouterHarness(fixture: fixture, executor: executor)
+    let create = makeCreateBuildRequest(
+      targets: [ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil)],
+      responseChannel: 201
+    )
+
+    XCTAssertTrue(try harness.sendClient(create, channel: 101))
+    XCTAssertEqual(try harness.createdID(on: 101), -1)
+    XCTAssertTrue(
+      try harness.sendClient(
+        BuildStartRequest(sessionHandle: create.sessionHandle, id: -1),
+        channel: 102
+      )
+    )
+    XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationEnded.name))
+
+    let tasks = harness.xcodeFrames(on: 201)
+      .filter { $0.messageName == BuildOperationTaskStarted.name }
+      .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
+    let remote = try XCTUnwrap(tasks.first { $0.id == 2 })
+    XCTAssertEqual(remote.info.taskName, "Compile Swift module App")
+    XCTAssertEqual(
+      remote.info.executionDescription,
+      "Compile Swift module App — Remote cache hit"
+    )
+    XCTAssertEqual(remote.info.commandLineDisplayString, "actual-swiftc -c Input.swift")
+
+    let worker = try XCTUnwrap(tasks.first { $0.id == 3 })
+    XCTAssertEqual(worker.info.taskName, "Link App")
+    XCTAssertEqual(worker.info.executionDescription, "Link App — Executed with worker")
+    XCTAssertEqual(worker.info.commandLineDisplayString, "actual-clang -o App")
+  }
+
   func testMappedBuildOwnsCreateStartEventsAndTerminalExactlyOnce() throws {
     let fixture = try PlanBuilderFixture()
     let executor = RouterFakeExecutor(behavior: .succeedWithEvents)
@@ -39,10 +76,59 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationEnded.name }.count, 1)
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationTargetStarted.name }.count, 1)
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationTargetEnded.name }.count, 1)
-    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskStarted.name }.count, 2)
-    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskEnded.name }.count, 2)
+    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskStarted.name }.count, 3)
+    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskEnded.name }.count, 3)
     XCTAssertTrue(eventNames.contains(BuildOperationConsoleOutputEmitted.name))
     XCTAssertTrue(eventNames.contains(BuildOperationProgressUpdated.name))
+    let actionStarted = try XCTUnwrap(
+      harness.xcodeFrames(on: 201)
+        .filter { $0.messageName == BuildOperationTaskStarted.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
+        .first { $0.id == 2 }
+    )
+    let actionEnded = try XCTUnwrap(
+      harness.xcodeFrames(on: 201)
+        .filter { $0.messageName == BuildOperationTaskEnded.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationTaskEnded.self) }
+        .first { $0.id == 2 }
+    )
+    XCTAssertNil(actionStarted.parentID)
+    XCTAssertEqual(actionStarted.info.taskName, "Compile Swift module App")
+    XCTAssertEqual(
+      actionStarted.info.executionDescription,
+      "Compile Swift module App — Completed (cache status unavailable)"
+    )
+    XCTAssertEqual(actionStarted.info.ruleInfo, "SwiftCompile //app:App App.app")
+    XCTAssertEqual(
+      BuildOperationTaskSignature(rawValue: actionStarted.info.signature),
+      .taskIdentifier(
+        ByteString(encodingAsUTF8: "rules_xcodeproj.bazel.action.v1://app:App|App.app|debug")
+      )
+    )
+    XCTAssertEqual(
+      actionEnded.signature,
+      BuildOperationTaskSignature(rawValue: actionStarted.info.signature)
+    )
+    let upToDateStarted = try XCTUnwrap(
+      harness.xcodeFrames(on: 201)
+        .filter { $0.messageName == BuildOperationTaskStarted.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
+        .first { $0.id == 3 }
+    )
+    XCTAssertEqual(upToDateStarted.info.taskName, "Archive App")
+    XCTAssertEqual(
+      upToDateStarted.info.executionDescription,
+      "Archive App — Up to date (cache source unavailable)"
+    )
+    let progressMessages = harness.xcodeFrames(on: 201)
+      .filter { $0.messageName == BuildOperationProgressUpdated.name }
+      .compactMap { try? harness.decode($0, as: BuildOperationProgressUpdated.self) }
+      .map(\.statusMessage)
+    XCTAssertTrue(
+      progressMessages.contains(
+        "Bazel presented 2 actions: 0 executed, 0 cache hits, 1 completed (cache status unavailable), 1 up-to-date"
+      )
+    )
     let ended = try SwiftBuildProtocolCodec.decodeBuildOperationEnded(
       try XCTUnwrap(harness.xcodeFrames(on: 201).last).payload
     )
@@ -1226,6 +1312,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
 private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Sendable {
   enum Behavior {
     case signalledCancellation
+    case succeedWithDetailedActions
     case succeedWithEvents
     case waitForReleaseThenSucceed
     case waitForCancellation
@@ -1288,9 +1375,109 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
         try await onEvent(
           .bep(.progress(ProxyProgress(completed: 1, source: .interactiveHint, total: 2))))
         try await onEvent(
-          .bep(.actionCompleted(identity: "//app:App|App.app|debug", succeeded: true))
+          .bep(
+            .actionCompleted(
+              BEPActionCompleted(
+                configuration: "debug",
+                identity: "//app:App|App.app|debug",
+                label: "//app:App",
+                mnemonic: "SwiftCompile",
+                primaryOutput: "App.app",
+                succeeded: true
+              )
+            )
+          )
+        )
+        try await onEvent(
+          .action(
+            BazelPresentedAction(
+              upToDate: BazelConfiguredAction(
+                configuration: "debug",
+                label: "//app:App",
+                mnemonic: "CppArchive",
+                primaryOutput: "libApp.a"
+              )
+            )
+          )
+        )
+        try await onEvent(
+          .actionSummary(
+            BazelActionPresentationSummary(
+              completedStatusUnavailable: 1,
+              executed: 0,
+              presented: 2,
+              upToDate: 1
+            )
+          )
         )
         try await onEvent(.bep(.reportedExecutedActionCount(1)))
+        try await onEvent(.bep(.finished(succeeded: true)))
+        return BazelOperationExecutionResult(status: .succeeded)
+      } catch {
+        return BazelOperationExecutionResult(
+          failure: BazelOperationFailure(phase: .presentation, message: error.localizedDescription),
+          status: .failed
+        )
+      }
+    case .succeedWithDetailedActions:
+      do {
+        let swift = BazelConfiguredAction(
+          commandLineDisplayString: "configured-swiftc",
+          configuration: "debug",
+          label: "//app:App",
+          mnemonic: "SwiftCompile",
+          primaryOutput: "App.swiftmodule"
+        )
+        try await onEvent(
+          .action(
+            BazelPresentedAction(
+              configured: swift,
+              executionRecord: BazelExecutionRecord(
+                cacheHit: true,
+                commandLineDisplayString: "actual-swiftc -c Input.swift",
+                exitCode: 0,
+                listedOutputs: ["App.swiftmodule"],
+                mnemonic: "SwiftCompile",
+                runner: "remote cache hit",
+                status: nil,
+                targetLabel: "//app:App"
+              )
+            )
+          )
+        )
+        let link = BazelConfiguredAction(
+          configuration: "debug",
+          label: "//app:App",
+          mnemonic: "ObjcLink",
+          primaryOutput: "App"
+        )
+        try await onEvent(
+          .action(
+            BazelPresentedAction(
+              configured: link,
+              executionRecord: BazelExecutionRecord(
+                cacheHit: false,
+                commandLineDisplayString: "actual-clang -o App",
+                exitCode: 0,
+                listedOutputs: ["App"],
+                mnemonic: "ObjcLink",
+                runner: "worker",
+                status: "SUCCESS",
+                targetLabel: "//app:App"
+              )
+            )
+          )
+        )
+        try await onEvent(
+          .actionSummary(
+            BazelActionPresentationSummary(
+              cacheHits: 1,
+              executed: 1,
+              presented: 2,
+              upToDate: 0
+            )
+          )
+        )
         try await onEvent(.bep(.finished(succeeded: true)))
         return BazelOperationExecutionResult(status: .succeeded)
       } catch {

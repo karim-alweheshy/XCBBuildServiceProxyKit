@@ -21,13 +21,17 @@ extension AdapterInvocationFactory: AdapterInvocationPreparing {
 }
 
 public enum BazelOperationExecutionEvent: Equatable, Sendable {
+  case action(BazelPresentedAction)
+  case actionSummary(BazelActionPresentationSummary)
   case bep(BEPEvent)
   case processOutput(ProcessOutputEvent)
 }
 
 public enum BazelOperationFailurePhase: String, Equatable, Sendable {
+  case actionGraphValidation
   case bepValidation
   case clean
+  case executionLogValidation
   case invocationPreparation
   case invocationReceipt
   case materialization
@@ -49,7 +53,9 @@ public struct BazelOperationFailure: Equatable, Sendable {
 public struct BazelOperationExecutionResult: Equatable, Sendable {
   public let bep: BEPValidation?
   public let cleanReceipt: CleanReceipt?
+  public let configuredActionGraph: ConfiguredActionGraphValidation?
   public let failure: BazelOperationFailure?
+  public let executionLog: BazelExecutionLogValidation?
   public let invocationReceipt: InvocationReceipt?
   public let operationDirectoryURL: URL?
   public let processCompletion: ProcessCompletion?
@@ -59,7 +65,9 @@ public struct BazelOperationExecutionResult: Equatable, Sendable {
   public init(
     bep: BEPValidation? = nil,
     cleanReceipt: CleanReceipt? = nil,
+    configuredActionGraph: ConfiguredActionGraphValidation? = nil,
     failure: BazelOperationFailure? = nil,
+    executionLog: BazelExecutionLogValidation? = nil,
     invocationReceipt: InvocationReceipt? = nil,
     operationDirectoryURL: URL? = nil,
     processCompletion: ProcessCompletion? = nil,
@@ -68,7 +76,9 @@ public struct BazelOperationExecutionResult: Equatable, Sendable {
   ) {
     self.bep = bep
     self.cleanReceipt = cleanReceipt
+    self.configuredActionGraph = configuredActionGraph
     self.failure = failure
+    self.executionLog = executionLog
     self.invocationReceipt = invocationReceipt
     self.operationDirectoryURL = operationDirectoryURL
     self.processCompletion = processCompletion
@@ -226,15 +236,126 @@ public struct BazelOperationExecutor: Sendable {
         )
       }
 
+      let configuredActionGraph: ConfiguredActionGraphValidation?
+      if case .indexBuild = plan.intent.action {
+        configuredActionGraph = nil
+      } else if FileManager.default.fileExists(atPath: invocation.actionGraphURL.path) {
+        do {
+          configuredActionGraph = try ConfiguredActionGraphValidator.validate(
+            fileAt: invocation.actionGraphURL,
+            productPaths: Set(plan.targets.compactMap(\.mapping.product.path)),
+            configurations: Set(plan.targets.compactMap(Self.configurationName))
+          )
+        } catch {
+          return failed(
+            .actionGraphValidation,
+            error,
+            bep: bep,
+            invocationReceipt: receipt,
+            operationDirectoryURL: invocation.operationDirectoryURL,
+            processCompletion: completion
+          )
+        }
+      } else {
+        configuredActionGraph = nil
+      }
+
+      let executionLog: BazelExecutionLogValidation?
+      if FileManager.default.fileExists(atPath: invocation.executionLogURL.path) {
+        do {
+          executionLog = try BazelExecutionLogValidator.validate(fileAt: invocation.executionLogURL)
+        } catch {
+          return failed(
+            .executionLogValidation,
+            error,
+            bep: bep,
+            configuredActionGraph: configuredActionGraph,
+            invocationReceipt: receipt,
+            operationDirectoryURL: invocation.operationDirectoryURL,
+            processCompletion: completion
+          )
+        }
+      } else {
+        executionLog = nil
+      }
+
       do {
+        let completedActions = bep.events.compactMap { event -> BEPActionCompleted? in
+          guard case .actionCompleted(let action) = event, action.succeeded != nil else {
+            return nil
+          }
+          return action
+        }
+        let configuredByKey = Dictionary(
+          uniqueKeysWithValues: (configuredActionGraph?.actions ?? []).map {
+            ($0.reconciliationKey, $0)
+          }
+        )
+        let completedActionKeys = Set(completedActions.map(\.reconciliationKey))
+        var cacheHits = 0
+        var completedStatusUnavailable = 0
+        var executed = 0
         for event in bep.events {
           try Task.checkCancellation()
-          try await onEvent(.bep(event))
+          switch event {
+          case .actionCompleted(let action) where action.succeeded != nil:
+            let record = executionLog?.record(for: action.reconciliationKey)
+            let presented = BazelPresentedAction(
+              completed: action,
+              configured: configuredByKey[action.reconciliationKey],
+              executionRecord: record
+            )
+            switch presented.disposition {
+            case .cacheHit:
+              cacheHits += 1
+            case .completed:
+              completedStatusUnavailable += 1
+            case .executed:
+              executed += 1
+            case .upToDate:
+              break
+            }
+            try await onEvent(.action(presented))
+          case .reportedExecutedActionCount where configuredActionGraph != nil:
+            break
+          default:
+            try await onEvent(.bep(event))
+          }
+        }
+        if bep.result.succeeded, let configuredActionGraph {
+          let remaining = configuredActionGraph.actions.filter {
+            !completedActionKeys.contains($0.reconciliationKey)
+          }
+          var upToDate = 0
+          for action in remaining {
+            try Task.checkCancellation()
+            if let record = executionLog?.record(for: action.reconciliationKey) {
+              let presented = BazelPresentedAction(configured: action, executionRecord: record)
+              if case .cacheHit = presented.disposition { cacheHits += 1 } else { executed += 1 }
+              try await onEvent(.action(presented))
+            } else {
+              upToDate += 1
+              try await onEvent(.action(BazelPresentedAction(upToDate: action)))
+            }
+          }
+          try await onEvent(
+            .actionSummary(
+              BazelActionPresentationSummary(
+                cacheHits: cacheHits,
+                completedStatusUnavailable: completedStatusUnavailable,
+                executed: executed,
+                presented: completedActions.count + remaining.count,
+                upToDate: upToDate
+              )
+            )
+          )
         }
       } catch {
         if Task.isCancelled {
           return BazelOperationExecutionResult(
             bep: bep,
+            configuredActionGraph: configuredActionGraph,
+            executionLog: executionLog,
             invocationReceipt: receipt,
             operationDirectoryURL: invocation.operationDirectoryURL,
             processCompletion: completion,
@@ -245,6 +366,8 @@ public struct BazelOperationExecutor: Sendable {
           .presentation,
           error,
           bep: bep,
+          configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion
@@ -254,10 +377,12 @@ public struct BazelOperationExecutor: Sendable {
       guard bep.result.succeeded else {
         return BazelOperationExecutionResult(
           bep: bep,
+          configuredActionGraph: configuredActionGraph,
           failure: BazelOperationFailure(
             phase: .bepValidation,
             message: "Bazel reported a failed terminal build event."
           ),
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -267,6 +392,8 @@ public struct BazelOperationExecutor: Sendable {
       guard !Task.isCancelled else {
         return BazelOperationExecutionResult(
           bep: bep,
+          configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -277,6 +404,8 @@ public struct BazelOperationExecutor: Sendable {
       if case .indexBuild = plan.intent.action {
         return BazelOperationExecutionResult(
           bep: bep,
+          configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -291,6 +420,8 @@ public struct BazelOperationExecutor: Sendable {
         )
         return BazelOperationExecutionResult(
           bep: bep,
+          configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -300,6 +431,8 @@ public struct BazelOperationExecutor: Sendable {
       } catch ProductMutationCancellationError.cancelledBeforeCommit {
         return BazelOperationExecutionResult(
           bep: bep,
+          configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -310,6 +443,8 @@ public struct BazelOperationExecutor: Sendable {
           .materialization,
           error,
           bep: bep,
+          configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion
@@ -347,16 +482,20 @@ public struct BazelOperationExecutor: Sendable {
     _ phase: BazelOperationFailurePhase,
     _ error: any Error,
     bep: BEPValidation? = nil,
+    configuredActionGraph: ConfiguredActionGraphValidation? = nil,
+    executionLog: BazelExecutionLogValidation? = nil,
     invocationReceipt: InvocationReceipt? = nil,
     operationDirectoryURL: URL? = nil,
     processCompletion: ProcessCompletion? = nil
   ) -> BazelOperationExecutionResult {
     BazelOperationExecutionResult(
       bep: bep,
+      configuredActionGraph: configuredActionGraph,
       failure: BazelOperationFailure(
         phase: phase,
         message: error.localizedDescription
       ),
+      executionLog: executionLog,
       invocationReceipt: invocationReceipt,
       operationDirectoryURL: operationDirectoryURL,
       processCompletion: processCompletion,
@@ -371,6 +510,13 @@ public struct BazelOperationExecutor: Sendable {
     case .signalled(let signal):
       return "The Bazel adapter terminated after signal \(signal)."
     }
+  }
+
+  private static func configurationName(_ target: ResolvedTargetPlan) -> String? {
+    guard let path = target.mapping.product.path else { return nil }
+    let components = path.split(separator: "/", omittingEmptySubsequences: true)
+    guard components.count > 1, components[0] == "bazel-out" else { return nil }
+    return String(components[1])
   }
 }
 

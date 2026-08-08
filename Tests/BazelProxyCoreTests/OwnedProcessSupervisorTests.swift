@@ -147,9 +147,11 @@ final class OwnedProcessSupervisorTests: XCTestCase {
       operationRootURL: fixture.rootURL.appendingPathComponent("operations")
     ).make(for: fixture.plan(), processEnvironment: [:])
     let modified = AdapterInvocation(
+      actionGraphURL: invocation.actionGraphURL,
       arguments: ["--forbidden"],
       bepURL: invocation.bepURL,
       environment: invocation.environment,
+      executionLogURL: invocation.executionLogURL,
       executableURL: invocation.executableURL,
       operationDirectoryURL: invocation.operationDirectoryURL,
       receiptURL: invocation.receiptURL,

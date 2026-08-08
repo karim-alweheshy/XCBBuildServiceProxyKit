@@ -4,6 +4,92 @@ import XCTest
 @testable import BazelProxyCore
 
 final class FakeAdapterIntegrationTests: XCTestCase {
+  func testExecutorReconcilesExecutedAndUpToDateConfiguredActions() async throws {
+    let fixture = try ManifestFixture()
+    let source = fixture.workspaceURL.appendingPathComponent(
+      "bazel-out/products/App.app",
+      isDirectory: true
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let plan = try planWithProduct(fixture: fixture, source: source, destination: destination)
+    try setAdapterScript(actionGraphSuccessScript(), fixture: fixture)
+    let collector = ExecutionEventCollector()
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      )
+    )
+
+    let result = await executor.execute(plan: plan, processEnvironment: [:]) { event in
+      await collector.append(event)
+    }
+
+    XCTAssertEqual(result.status, .succeeded, String(describing: result.failure))
+    XCTAssertEqual(result.configuredActionGraph?.actions.count, 2)
+    let events = await collector.snapshot()
+    XCTAssertTrue(
+      events.contains(
+        .action(
+          BazelPresentedAction(
+            completed: BEPActionCompleted(
+              commandLineDisplayString: "bep-bundle",
+              configuration: "9f6e-real-bep-configuration-digest",
+              identity:
+                "//app:App|bazel-out/products/App.app|9f6e-real-bep-configuration-digest",
+              label: "//app:App",
+              mnemonic: "BundleTreeApp",
+              primaryOutput: "bazel-out/products/App.app",
+              succeeded: true
+            ),
+            configured: BazelConfiguredAction(
+              commandLineDisplayString: "configured-bundle",
+              configuration: "products",
+              label: "//app:App",
+              mnemonic: "BundleTreeApp",
+              primaryOutput: "bazel-out/products/App.app"
+            ),
+            executionRecord: BazelExecutionRecord(
+              cacheHit: false,
+              commandLineDisplayString: "actual-bundle",
+              exitCode: 0,
+              listedOutputs: ["bazel-out/products/App.app"],
+              mnemonic: "BundleTreeApp",
+              runner: "local",
+              status: "SUCCESS",
+              targetLabel: "//app:App"
+            )
+          )
+        )
+      )
+    )
+    XCTAssertTrue(
+      events.contains(
+        .action(
+          BazelPresentedAction(
+            upToDate: BazelConfiguredAction(
+              commandLineDisplayString: BazelCommandDisplay.omittedPlaceholder,
+              configuration: "products",
+              label: "//app:App.library",
+              mnemonic: "SwiftCompile",
+              primaryOutput: "bazel-out/products/App.swiftmodule"
+            )
+          )
+        )
+      )
+    )
+    XCTAssertTrue(
+      events.contains(
+        .actionSummary(
+          BazelActionPresentationSummary(executed: 1, presented: 2, upToDate: 1)
+        )
+      )
+    )
+    XCTAssertFalse(events.contains(.bep(.reportedExecutedActionCount(1))))
+  }
+
   func testExecutorComposesOutputBEPReceiptAndMaterialization() async throws {
     let fixture = try ManifestFixture()
     let source = fixture.workspaceURL.appendingPathComponent(
@@ -450,6 +536,33 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
     printf 'WARNING: fake adapter warning\n' >&2
     printf 'fake adapter complete\n'
+    """
+  }
+
+  private func actionGraphSuccessScript() -> String {
+    """
+    #!/bin/sh
+    set -eu
+    /bin/mkdir -p "$PWD/bazel-out/products/App.app"
+    printf 'fake-product' > "$PWD/bazel-out/products/App.app/artifact"
+    printf '%s\n' \
+      '{"id":{"actionCompleted":{"configuration":"9f6e-real-bep-configuration-digest","label":"//app:App","primaryOutput":"bazel-out/products/App.app"}},"action":{"success":true,"type":"BundleTreeApp","commandLine":["bep-bundle"]}}' \
+      '{"buildMetrics":{"actionSummary":{"actionsExecuted":"1"}}}' \
+      '{"finished":{"overallSuccess":true}}' \
+      > "$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
+    long=$(/usr/bin/printf '%017000d' 0)
+    /bin/cat > "$SWIFTBUILD_BAZEL_PROXY_ACTION_GRAPH_PATH" <<EOF
+    {"actions":[{"arguments":["$long"],"configurationId":1,"mnemonic":"SwiftCompile","outputIds":[1],"primaryOutputId":1,"targetId":1},{"arguments":["configured-bundle"],"configurationId":1,"inputDepSetIds":[10],"mnemonic":"BundleTreeApp","outputIds":[2],"primaryOutputId":2,"targetId":2}],"artifacts":[{"id":1,"pathFragmentId":5},{"id":2,"pathFragmentId":6}],"configuration":[{"id":1,"mnemonic":"products"}],"depSetOfFiles":[{"id":10,"directArtifactIds":[1]}],"pathFragments":[{"id":1,"label":"bazel-out"},{"id":2,"label":"products","parentId":1},{"id":5,"label":"App.swiftmodule","parentId":2},{"id":6,"label":"App.app","parentId":2}],"targets":[{"id":1,"label":"//app:App.library"},{"id":2,"label":"//app:App"}]}
+    EOF
+    /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_ACTION_GRAPH_PATH"
+    printf '%s\n' \
+      '{"commandArgs":["actual-bundle"],"listedOutputs":["bazel-out/products/App.app"],"mnemonic":"BundleTreeApp","runner":"local","cacheHit":false,"status":"SUCCESS","exitCode":0,"targetLabel":"//app:App"}' \
+      > "$SWIFTBUILD_BAZEL_PROXY_EXECUTION_LOG_PATH"
+    /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_EXECUTION_LOG_PATH"
+    /bin/cat > "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT" <<EOF
+    {"bazelrcs":[],"command":"build","commandOptions":["--config=_rules_xcodeproj_build"],"environmentKeys":[],"labels":["//app:App"],"materialization":{"contract":"manifest-v2"},"modes":{"action":"build","config":"_rules_xcodeproj_build","coverage":"NO","previews":"NO"},"outputGroups":["bp app-app","index_import","target_ids_list"],"provenance":{"bepPath":"$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"},"schemaVersion":1,"startupOptions":[],"targetIDs":["app-app"],"targets":["//app:AppProject"],"workingDirectory":"$PWD"}
+    EOF
+    /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
     """
   }
 

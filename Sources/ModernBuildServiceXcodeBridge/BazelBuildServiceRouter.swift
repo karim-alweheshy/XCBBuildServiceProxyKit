@@ -1339,8 +1339,17 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       condition.unlock()
       return
     }
+    let presentedAction: BazelPresentedAction?
+    switch event {
+    case .action(let action):
+      presentedAction = action
+    case .bep(.actionCompleted(let action)) where action.succeeded != nil:
+      presentedAction = BazelPresentedAction(completed: action)
+    default:
+      presentedAction = nil
+    }
     var actionTaskID: Int?
-    if case .bep(.actionCompleted(_, let succeeded)) = event, succeeded != nil {
+    if presentedAction != nil {
       actionTaskID = operation.presentation.nextTaskID
       operation.presentation.nextTaskID += 1
     }
@@ -1350,7 +1359,100 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     condition.unlock()
     defer { eventDidFinish(operationID: operationID) }
 
+    if let action = presentedAction, let taskID = actionTaskID {
+      let signature = "rules_xcodeproj.bazel.action.v1:\(action.identity)"
+      let label = action.label.isEmpty ? nil : action.label
+      let targetID = label.flatMap { actionLabel in
+        operation.plan.targets.first { $0.mapping.bazelLabel == actionLabel }
+          .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
+      }
+      let actionName = action.taskTitle
+      let executionDescription: String
+      let status: SwiftBuildPresentedTaskStatus
+      switch action.disposition {
+      case .cacheHit(let kind):
+        switch kind {
+        case .disk:
+          executionDescription = "\(actionName) — Disk cache hit"
+        case .remote:
+          executionDescription = "\(actionName) — Remote cache hit"
+        case .other:
+          executionDescription = "\(actionName) — Cache hit"
+        }
+        status = .succeeded
+      case .completed(let succeeded):
+        executionDescription = "\(actionName) — Completed (cache status unavailable)"
+        status = succeeded ? .succeeded : .failed
+      case .executed(let succeeded, let runner):
+        let executionState: String
+        switch runner?.lowercased() {
+        case .some(let value) where value.contains("remote"):
+          executionState = "Executed remotely"
+        case .some(let value) where value.contains("local") || value.contains("sandbox"):
+          executionState = "Executed locally"
+        case .some(let value) where value.contains("worker"):
+          executionState = "Executed with worker"
+        default:
+          executionState = "Executed"
+        }
+        executionDescription = "\(actionName) — \(executionState)"
+        status = succeeded ? .succeeded : .failed
+      case .upToDate:
+        executionDescription = "\(actionName) — Up to date (cache source unavailable)"
+        status = .succeeded
+      }
+      let ruleInfo = [
+        action.mnemonic,
+        label,
+        action.primaryOutput.isEmpty ? nil : action.primaryOutput,
+      ]
+      .compactMap { $0 }
+      .joined(separator: " ")
+      try send(
+        SwiftBuildOperationPresenter.encodeTaskStarted(
+          SwiftBuildPresentedTask(
+            commandLineDisplayString: action.commandLineDisplayString,
+            executionDescription: executionDescription,
+            id: taskID,
+            interestingPath: nil,
+            parentID: nil,
+            ruleInfo: ruleInfo,
+            serializedDiagnosticsPaths: [],
+            stableSignature: signature,
+            targetID: targetID,
+            taskName: actionName
+          )
+        ),
+        channel: channel,
+        outputs: outputs
+      )
+      try send(
+        SwiftBuildOperationPresenter.encodeTaskEnded(
+          id: taskID,
+          stableSignature: signature,
+          status: status,
+          signalled: false
+        ),
+        channel: channel,
+        outputs: outputs
+      )
+      return
+    }
+
     switch event {
+    case .action:
+      return
+    case .actionSummary(let summary):
+      try send(
+        SwiftBuildOperationPresenter.encodeProgressUpdated(
+          statusMessage:
+            "Bazel presented \(summary.presented) \(Self.actionWord(summary.presented)): \(summary.executed) executed, \(summary.cacheHits) cache hits, \(summary.completedStatusUnavailable) completed (cache status unavailable), \(summary.upToDate) up-to-date",
+          percentComplete: 100,
+          showInLog: true
+        ),
+        channel: channel,
+        outputs: outputs
+      )
     case .processOutput(let output):
       try send(
         SwiftBuildOperationPresenter.encodeConsoleOutput(
@@ -1363,43 +1465,9 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       )
     case .bep(let event):
       switch event {
-      case .actionCompleted(let identity, let succeeded):
-        guard let succeeded else { return }
-        guard let taskID = actionTaskID else { return }
-        let signature = "rules_xcodeproj.bazel.action.v1:\(identity)"
-        let label = identity.split(separator: "|", maxSplits: 1).first.map(String.init)
-        let targetID = label.flatMap { label in
-          operation.plan.targets.first { $0.mapping.bazelLabel == label }
-            .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
-        }
-        try send(
-          SwiftBuildOperationPresenter.encodeTaskStarted(
-            SwiftBuildPresentedTask(
-              commandLineDisplayString: nil,
-              executionDescription: "Bazel action",
-              id: taskID,
-              interestingPath: nil,
-              parentID: operation.presentation.wrapperTaskID,
-              ruleInfo: "BazelAction \(label ?? "")",
-              serializedDiagnosticsPaths: [],
-              stableSignature: signature,
-              targetID: targetID,
-              taskName: "Bazel action"
-            )
-          ),
-          channel: channel,
-          outputs: outputs
-        )
-        try send(
-          SwiftBuildOperationPresenter.encodeTaskEnded(
-            id: taskID,
-            stableSignature: signature,
-            status: succeeded ? .succeeded : .failed,
-            signalled: false
-          ),
-          channel: channel,
-          outputs: outputs
-        )
+      case .actionCompleted(let action):
+        _ = action
+        return
       case .progress(let progress):
         let percent =
           progress.total.map {
@@ -1421,7 +1489,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       case .reportedExecutedActionCount(let count):
         try send(
           SwiftBuildOperationPresenter.encodeProgressUpdated(
-            statusMessage: "Bazel executed \(count) actions",
+            statusMessage: "Bazel executed \(count) \(Self.actionWord(count))",
             percentComplete: 100,
             showInLog: true
           ),
@@ -1447,6 +1515,10 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         break
       }
     }
+  }
+
+  private static func actionWord(_ count: Int) -> String {
+    count == 1 ? "action" : "actions"
   }
 
   private func emitFailure(
