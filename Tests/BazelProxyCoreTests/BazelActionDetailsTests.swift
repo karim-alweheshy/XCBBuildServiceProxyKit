@@ -81,7 +81,7 @@ final class BazelActionDetailsTests: XCTestCase {
     let validation = try BazelExecutionLogValidator.validate(
       fileAt: URL(fileURLWithPath: path)
     )
-    XCTAssertFalse(validation.records.isEmpty)
+    XCTAssertGreaterThan(validation.fileBytes, 0)
   }
 
   func testExecutionLogRejectsMalformedOversizedSymlinkAndAmbiguousData() throws {

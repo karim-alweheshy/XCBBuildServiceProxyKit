@@ -186,6 +186,7 @@ enum BazelCompactExecutionLogDecoder {
   ) throws -> BazelExecutionRecord {
     var reader = ProtoReader(data)
     var arguments = [String]()
+    var commandDisplayExceededLimits = false
     var cacheHit = false
     var exitCode: Int?
     var mnemonic: String?
@@ -199,10 +200,12 @@ enum BazelCompactExecutionLogDecoder {
       switch field.number {
       case 1:
         try field.require(.lengthDelimited)
-        guard arguments.count < limits.command.maximumArgumentCount else {
-          throw BazelExecutionLogError.malformedCompactLog
+        let argument = try reader.readString()
+        if arguments.count < limits.command.maximumArgumentCount {
+          arguments.append(argument)
+        } else {
+          commandDisplayExceededLimits = true
         }
-        arguments.append(try reader.readString())
       case 6:
         try field.require(.lengthDelimited)
         guard outputPaths.count < limits.command.maximumArgumentCount else {
@@ -222,7 +225,7 @@ enum BazelCompactExecutionLogDecoder {
         mnemonic = nonEmpty(try reader.readString())
       case 9:
         try field.require(.varint)
-        exitCode = Int(Int32(bitPattern: try reader.readUInt32()))
+        exitCode = Int(Int32(truncatingIfNeeded: try reader.readVarint()))
       case 10:
         try field.require(.lengthDelimited)
         status = nonEmpty(try reader.readString())
@@ -247,7 +250,9 @@ enum BazelCompactExecutionLogDecoder {
 
     return BazelExecutionRecord(
       cacheHit: cacheHit,
-      commandLineDisplayString: BazelCommandDisplay.sanitize(arguments, limits: limits.command),
+      commandLineDisplayString: commandDisplayExceededLimits
+        ? BazelCommandDisplay.omittedPlaceholder
+        : BazelCommandDisplay.sanitize(arguments, limits: limits.command),
       exitCode: exitCode,
       listedOutputs: outputPaths,
       mnemonic: mnemonic,

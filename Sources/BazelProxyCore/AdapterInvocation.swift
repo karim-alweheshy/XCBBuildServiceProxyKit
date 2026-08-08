@@ -123,7 +123,7 @@ public struct AdapterInvocationFactory: Sendable {
 
       let actionGraphURL = operationURL.appendingPathComponent("configured-actions.json")
       let bepURL = operationURL.appendingPathComponent("build-event.jsonl")
-      let executionLogURL = operationURL.appendingPathComponent("execution-log.jsonl")
+      let executionLogURL = operationURL.appendingPathComponent("execution-log")
       let receiptURL = operationURL.appendingPathComponent("invocation-receipt.json")
       var finalEnvironment = environment
       finalEnvironment[Self.actionGraphEnvironmentKey] = actionGraphURL.path

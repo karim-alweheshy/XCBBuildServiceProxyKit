@@ -74,7 +74,8 @@ let package = Package(
         "BazelProxyCore",
         .product(name: "libzstd", package: "zstd"),
       ],
-      path: "Tests/BazelProxyCoreTests"
+      path: "Tests/BazelProxyCoreTests",
+      resources: [.copy("Fixtures")]
     ),
   ],
   swiftLanguageModes: [.v5]

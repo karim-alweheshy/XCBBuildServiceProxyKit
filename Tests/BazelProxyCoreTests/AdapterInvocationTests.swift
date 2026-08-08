@@ -71,6 +71,7 @@ final class AdapterInvocationTests: XCTestCase {
       invocation.environment[AdapterInvocationFactory.executionLogEnvironmentKey],
       invocation.executionLogURL.path
     )
+    XCTAssertEqual(invocation.executionLogURL.lastPathComponent, "execution-log")
     XCTAssertEqual(
       invocation.environment[AdapterInvocationFactory.requestDirectoryEnvironmentKey],
       invocation.requestDirectoryURL.path

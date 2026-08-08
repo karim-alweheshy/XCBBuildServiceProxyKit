@@ -289,6 +289,79 @@ final class BazelCompactExecutionLogTests: XCTestCase {
       XCTAssertEqual(error as? BazelExecutionLogError, .unsafeFile(fixture.root.path))
     }
   }
+
+  func testRealBazelNineCompactLogWithSpawns() throws {
+    let url = try XCTUnwrap(
+      Bundle.module.url(
+        forResource: "real-53-action.bazel-9.2",
+        withExtension: "compact",
+        subdirectory: "Fixtures"
+      )
+    )
+    let validation = try BazelExecutionLogValidator.validate(fileAt: url)
+    XCTAssertEqual(validation.fileBytes, 35_185)
+    XCTAssertEqual(validation.records.count, 35)
+  }
+
+  func testRealBazelNineInvocationOnlyCompactLogIsValid() throws {
+    let url = try XCTUnwrap(
+      Bundle.module.url(
+        forResource: "invocation-only.bazel-9.2",
+        withExtension: "compact",
+        subdirectory: "Fixtures"
+      )
+    )
+    let validation = try BazelExecutionLogValidator.validate(fileAt: url)
+    XCTAssertEqual(validation.fileBytes, 66)
+    XCTAssertTrue(validation.records.isEmpty)
+  }
+
+  func testCompactLogOmitsOverLimitCommandWithoutRejectingRecord() throws {
+    let fixture = try TemporaryCompactExecutionLog()
+    defer { fixture.remove() }
+    try fixture.write(entries: [
+      compactEntry(
+        payloadField: 7,
+        payload: spawn(
+          arguments: ["swiftc", "first.swift", "second.swift"],
+          outputs: [],
+          label: "//app:App"
+        )
+      )
+    ])
+
+    let validation = try fixture.validate(
+      limits: BazelExecutionLogLimits(
+        command: BazelCommandDisplayLimits(maximumArgumentCount: 2)
+      )
+    )
+    XCTAssertEqual(validation.records.count, 1)
+    XCTAssertEqual(
+      validation.records[0].commandLineDisplayString,
+      BazelCommandDisplay.omittedPlaceholder
+    )
+  }
+
+  func testCompactLogDecodesCanonicalNegativeInt32ExitCode() throws {
+    let fixture = try TemporaryCompactExecutionLog()
+    defer { fixture.remove() }
+    try fixture.write(entries: [
+      compactEntry(
+        payloadField: 7,
+        payload: spawn(
+          outputs: [],
+          label: "//app:App",
+          exitCode: -1,
+          status: "LOCAL_EXEC_ERROR"
+        )
+      )
+    ])
+
+    let validation = try fixture.validate()
+    XCTAssertEqual(validation.records.count, 1)
+    XCTAssertEqual(validation.records[0].exitCode, -1)
+    XCTAssertEqual(validation.records[0].status, "LOCAL_EXEC_ERROR")
+  }
 }
 
 private enum SyntheticOutput {
@@ -373,7 +446,7 @@ private func spawn(
   result.append(protobufStringField(7, value: label))
   result.append(protobufStringField(8, value: mnemonic))
   if let exitCode {
-    result.append(protobufVarintField(9, value: UInt64(UInt32(bitPattern: exitCode))))
+    result.append(protobufVarintField(9, value: UInt64(bitPattern: Int64(exitCode))))
   }
   if let status { result.append(protobufStringField(10, value: status)) }
   if let runner { result.append(protobufStringField(11, value: runner)) }
