@@ -1339,8 +1339,17 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       condition.unlock()
       return
     }
+    let presentedAction: BazelPresentedAction?
+    switch event {
+    case .action(let action):
+      presentedAction = action
+    case .bep(.actionCompleted(let action)) where action.succeeded != nil:
+      presentedAction = BazelPresentedAction(completed: action)
+    default:
+      presentedAction = nil
+    }
     var actionTaskID: Int?
-    if case .bep(.actionCompleted(let action)) = event, action.succeeded != nil {
+    if presentedAction != nil {
       actionTaskID = operation.presentation.nextTaskID
       operation.presentation.nextTaskID += 1
     }
@@ -1350,7 +1359,76 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     condition.unlock()
     defer { eventDidFinish(operationID: operationID) }
 
+    if let action = presentedAction, let taskID = actionTaskID {
+      let signature = "rules_xcodeproj.bazel.action.v1:\(action.identity)"
+      let label = action.label.isEmpty ? nil : action.label
+      let targetID = label.flatMap { actionLabel in
+        operation.plan.targets.first { $0.mapping.bazelLabel == actionLabel }
+          .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
+      }
+      let actionName = action.mnemonic ?? "Bazel action"
+      let executionDescription: String
+      let status: SwiftBuildPresentedTaskStatus
+      switch action.disposition {
+      case .executed(let succeeded):
+        executionDescription = actionName
+        status = succeeded ? .succeeded : .failed
+      case .upToDate:
+        executionDescription = "\(actionName) (up-to-date)"
+        status = .succeeded
+      }
+      let ruleInfo = [
+        action.mnemonic,
+        label,
+        action.primaryOutput.isEmpty ? nil : action.primaryOutput,
+      ]
+      .compactMap { $0 }
+      .joined(separator: " ")
+      try send(
+        SwiftBuildOperationPresenter.encodeTaskStarted(
+          SwiftBuildPresentedTask(
+            commandLineDisplayString: nil,
+            executionDescription: executionDescription,
+            id: taskID,
+            interestingPath: nil,
+            parentID: nil,
+            ruleInfo: ruleInfo,
+            serializedDiagnosticsPaths: [],
+            stableSignature: signature,
+            targetID: targetID,
+            taskName: actionName
+          )
+        ),
+        channel: channel,
+        outputs: outputs
+      )
+      try send(
+        SwiftBuildOperationPresenter.encodeTaskEnded(
+          id: taskID,
+          stableSignature: signature,
+          status: status,
+          signalled: false
+        ),
+        channel: channel,
+        outputs: outputs
+      )
+      return
+    }
+
     switch event {
+    case .action:
+      return
+    case .actionSummary(let summary):
+      try send(
+        SwiftBuildOperationPresenter.encodeProgressUpdated(
+          statusMessage:
+            "Bazel presented \(summary.presented) \(Self.actionWord(summary.presented)): \(summary.executed) executed, \(summary.upToDate) up-to-date",
+          percentComplete: 100,
+          showInLog: true
+        ),
+        channel: channel,
+        outputs: outputs
+      )
     case .processOutput(let output):
       try send(
         SwiftBuildOperationPresenter.encodeConsoleOutput(
@@ -1364,50 +1442,8 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     case .bep(let event):
       switch event {
       case .actionCompleted(let action):
-        guard let succeeded = action.succeeded else { return }
-        guard let taskID = actionTaskID else { return }
-        let signature = "rules_xcodeproj.bazel.action.v1:\(action.identity)"
-        let label = action.label.isEmpty ? nil : action.label
-        let targetID = label.flatMap { actionLabel in
-          operation.plan.targets.first { $0.mapping.bazelLabel == actionLabel }
-            .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
-        }
-        let actionName = action.mnemonic ?? "Bazel action"
-        let ruleInfo = [
-          action.mnemonic,
-          label,
-          action.primaryOutput.isEmpty ? nil : action.primaryOutput,
-        ]
-        .compactMap { $0 }
-        .joined(separator: " ")
-        try send(
-          SwiftBuildOperationPresenter.encodeTaskStarted(
-            SwiftBuildPresentedTask(
-              commandLineDisplayString: nil,
-              executionDescription: actionName,
-              id: taskID,
-              interestingPath: nil,
-              parentID: nil,
-              ruleInfo: ruleInfo,
-              serializedDiagnosticsPaths: [],
-              stableSignature: signature,
-              targetID: targetID,
-              taskName: actionName
-            )
-          ),
-          channel: channel,
-          outputs: outputs
-        )
-        try send(
-          SwiftBuildOperationPresenter.encodeTaskEnded(
-            id: taskID,
-            stableSignature: signature,
-            status: succeeded ? .succeeded : .failed,
-            signalled: false
-          ),
-          channel: channel,
-          outputs: outputs
-        )
+        _ = action
+        return
       case .progress(let progress):
         let percent =
           progress.total.map {
@@ -1429,7 +1465,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       case .reportedExecutedActionCount(let count):
         try send(
           SwiftBuildOperationPresenter.encodeProgressUpdated(
-            statusMessage: "Bazel executed \(count) actions",
+            statusMessage: "Bazel executed \(count) \(Self.actionWord(count))",
             percentComplete: 100,
             showInLog: true
           ),
@@ -1455,6 +1491,10 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         break
       }
     }
+  }
+
+  private static func actionWord(_ count: Int) -> String {
+    count == 1 ? "action" : "actions"
   }
 
   private func emitFailure(

@@ -36,6 +36,7 @@ public enum AdapterInvocationError: LocalizedError, Equatable, Sendable {
 }
 
 public struct AdapterInvocation: Equatable, Sendable {
+  public let actionGraphURL: URL
   public let arguments: [String]
   public let bepURL: URL
   public let environment: [String: String]
@@ -51,6 +52,7 @@ public struct AdapterInvocation: Equatable, Sendable {
 }
 
 public struct AdapterInvocationFactory: Sendable {
+  public static let actionGraphEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_ACTION_GRAPH_PATH"
   public static let bepEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
   public static let receiptEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
   public static let requestDirectoryEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_REQUEST_DIR"
@@ -117,14 +119,17 @@ public struct AdapterInvocationFactory: Sendable {
         fileManager: fileManager
       )
 
+      let actionGraphURL = operationURL.appendingPathComponent("configured-actions.json")
       let bepURL = operationURL.appendingPathComponent("build-event.jsonl")
       let receiptURL = operationURL.appendingPathComponent("invocation-receipt.json")
       var finalEnvironment = environment
+      finalEnvironment[Self.actionGraphEnvironmentKey] = actionGraphURL.path
       finalEnvironment[Self.requestDirectoryEnvironmentKey] = requestURL.path
       finalEnvironment[Self.bepEnvironmentKey] = bepURL.path
       finalEnvironment[Self.receiptEnvironmentKey] = receiptURL.path
 
       return AdapterInvocation(
+        actionGraphURL: actionGraphURL,
         arguments: [],
         bepURL: bepURL,
         environment: finalEnvironment,

@@ -40,8 +40,8 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationEnded.name }.count, 1)
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationTargetStarted.name }.count, 1)
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationTargetEnded.name }.count, 1)
-    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskStarted.name }.count, 2)
-    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskEnded.name }.count, 2)
+    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskStarted.name }.count, 3)
+    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskEnded.name }.count, 3)
     XCTAssertTrue(eventNames.contains(BuildOperationConsoleOutputEmitted.name))
     XCTAssertTrue(eventNames.contains(BuildOperationProgressUpdated.name))
     let actionStarted = try XCTUnwrap(
@@ -69,6 +69,21 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(
       actionEnded.signature,
       BuildOperationTaskSignature(rawValue: actionStarted.info.signature)
+    )
+    let upToDateStarted = try XCTUnwrap(
+      harness.xcodeFrames(on: 201)
+        .filter { $0.messageName == BuildOperationTaskStarted.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
+        .first { $0.id == 3 }
+    )
+    XCTAssertEqual(upToDateStarted.info.taskName, "CppArchive")
+    XCTAssertEqual(upToDateStarted.info.executionDescription, "CppArchive (up-to-date)")
+    let progressMessages = harness.xcodeFrames(on: 201)
+      .filter { $0.messageName == BuildOperationProgressUpdated.name }
+      .compactMap { try? harness.decode($0, as: BuildOperationProgressUpdated.self) }
+      .map(\.statusMessage)
+    XCTAssertTrue(
+      progressMessages.contains("Bazel presented 2 actions: 1 executed, 1 up-to-date")
     )
     let ended = try SwiftBuildProtocolCodec.decodeBuildOperationEnded(
       try XCTUnwrap(harness.xcodeFrames(on: 201).last).payload
@@ -1327,6 +1342,21 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
               )
             )
           )
+        )
+        try await onEvent(
+          .action(
+            BazelPresentedAction(
+              upToDate: BazelConfiguredAction(
+                configuration: "debug",
+                label: "//app:App",
+                mnemonic: "CppArchive",
+                primaryOutput: "libApp.a"
+              )
+            )
+          )
+        )
+        try await onEvent(
+          .actionSummary(BazelActionPresentationSummary(executed: 1, presented: 2, upToDate: 1))
         )
         try await onEvent(.bep(.reportedExecutedActionCount(1)))
         try await onEvent(.bep(.finished(succeeded: true)))
