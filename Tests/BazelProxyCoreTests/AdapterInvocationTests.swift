@@ -58,6 +58,7 @@ final class AdapterInvocationTests: XCTestCase {
         "ACTION", "BAZEL_CONFIG", "HOME", "PATH", "SRCROOT",
         AdapterInvocationFactory.actionGraphEnvironmentKey,
         AdapterInvocationFactory.bepEnvironmentKey,
+        AdapterInvocationFactory.executionLogEnvironmentKey,
         AdapterInvocationFactory.receiptEnvironmentKey,
         AdapterInvocationFactory.requestDirectoryEnvironmentKey,
       ]
@@ -65,6 +66,10 @@ final class AdapterInvocationTests: XCTestCase {
     XCTAssertEqual(
       invocation.environment[AdapterInvocationFactory.actionGraphEnvironmentKey],
       invocation.actionGraphURL.path
+    )
+    XCTAssertEqual(
+      invocation.environment[AdapterInvocationFactory.executionLogEnvironmentKey],
+      invocation.executionLogURL.path
     )
     XCTAssertEqual(
       invocation.environment[AdapterInvocationFactory.requestDirectoryEnvironmentKey],

@@ -31,6 +31,7 @@ public enum BazelOperationFailurePhase: String, Equatable, Sendable {
   case actionGraphValidation
   case bepValidation
   case clean
+  case executionLogValidation
   case invocationPreparation
   case invocationReceipt
   case materialization
@@ -54,6 +55,7 @@ public struct BazelOperationExecutionResult: Equatable, Sendable {
   public let cleanReceipt: CleanReceipt?
   public let configuredActionGraph: ConfiguredActionGraphValidation?
   public let failure: BazelOperationFailure?
+  public let executionLog: BazelExecutionLogValidation?
   public let invocationReceipt: InvocationReceipt?
   public let operationDirectoryURL: URL?
   public let processCompletion: ProcessCompletion?
@@ -65,6 +67,7 @@ public struct BazelOperationExecutionResult: Equatable, Sendable {
     cleanReceipt: CleanReceipt? = nil,
     configuredActionGraph: ConfiguredActionGraphValidation? = nil,
     failure: BazelOperationFailure? = nil,
+    executionLog: BazelExecutionLogValidation? = nil,
     invocationReceipt: InvocationReceipt? = nil,
     operationDirectoryURL: URL? = nil,
     processCompletion: ProcessCompletion? = nil,
@@ -75,6 +78,7 @@ public struct BazelOperationExecutionResult: Equatable, Sendable {
     self.cleanReceipt = cleanReceipt
     self.configuredActionGraph = configuredActionGraph
     self.failure = failure
+    self.executionLog = executionLog
     self.invocationReceipt = invocationReceipt
     self.operationDirectoryURL = operationDirectoryURL
     self.processCompletion = processCompletion
@@ -256,6 +260,25 @@ public struct BazelOperationExecutor: Sendable {
         configuredActionGraph = nil
       }
 
+      let executionLog: BazelExecutionLogValidation?
+      if FileManager.default.fileExists(atPath: invocation.executionLogURL.path) {
+        do {
+          executionLog = try BazelExecutionLogValidator.validate(fileAt: invocation.executionLogURL)
+        } catch {
+          return failed(
+            .executionLogValidation,
+            error,
+            bep: bep,
+            configuredActionGraph: configuredActionGraph,
+            invocationReceipt: receipt,
+            operationDirectoryURL: invocation.operationDirectoryURL,
+            processCompletion: completion
+          )
+        }
+      } else {
+        executionLog = nil
+      }
+
       do {
         let completedActions = bep.events.compactMap { event -> BEPActionCompleted? in
           guard case .actionCompleted(let action) = event, action.succeeded != nil else {
@@ -263,12 +286,36 @@ public struct BazelOperationExecutor: Sendable {
           }
           return action
         }
+        let configuredByKey = Dictionary(
+          uniqueKeysWithValues: (configuredActionGraph?.actions ?? []).map {
+            ($0.reconciliationKey, $0)
+          }
+        )
         let completedActionKeys = Set(completedActions.map(\.reconciliationKey))
+        var cacheHits = 0
+        var completedStatusUnavailable = 0
+        var executed = 0
         for event in bep.events {
           try Task.checkCancellation()
           switch event {
           case .actionCompleted(let action) where action.succeeded != nil:
-            try await onEvent(.action(BazelPresentedAction(completed: action)))
+            let record = executionLog?.record(for: action.reconciliationKey)
+            let presented = BazelPresentedAction(
+              completed: action,
+              configured: configuredByKey[action.reconciliationKey],
+              executionRecord: record
+            )
+            switch presented.disposition {
+            case .cacheHit:
+              cacheHits += 1
+            case .completed:
+              completedStatusUnavailable += 1
+            case .executed:
+              executed += 1
+            case .upToDate:
+              break
+            }
+            try await onEvent(.action(presented))
           case .reportedExecutedActionCount where configuredActionGraph != nil:
             break
           default:
@@ -276,20 +323,29 @@ public struct BazelOperationExecutor: Sendable {
           }
         }
         if bep.result.succeeded, let configuredActionGraph {
-          let upToDate = configuredActionGraph.actions.filter {
+          let remaining = configuredActionGraph.actions.filter {
             !completedActionKeys.contains($0.reconciliationKey)
           }
-          for action in upToDate {
+          var upToDate = 0
+          for action in remaining {
             try Task.checkCancellation()
-            try await onEvent(.action(BazelPresentedAction(upToDate: action)))
+            if let record = executionLog?.record(for: action.reconciliationKey) {
+              let presented = BazelPresentedAction(configured: action, executionRecord: record)
+              if case .cacheHit = presented.disposition { cacheHits += 1 } else { executed += 1 }
+              try await onEvent(.action(presented))
+            } else {
+              upToDate += 1
+              try await onEvent(.action(BazelPresentedAction(upToDate: action)))
+            }
           }
-          let executed = bep.result.reportedExecutedActionCount ?? completedActions.count
           try await onEvent(
             .actionSummary(
               BazelActionPresentationSummary(
+                cacheHits: cacheHits,
+                completedStatusUnavailable: completedStatusUnavailable,
                 executed: executed,
-                presented: completedActions.count + upToDate.count,
-                upToDate: upToDate.count
+                presented: completedActions.count + remaining.count,
+                upToDate: upToDate
               )
             )
           )
@@ -299,6 +355,7 @@ public struct BazelOperationExecutor: Sendable {
           return BazelOperationExecutionResult(
             bep: bep,
             configuredActionGraph: configuredActionGraph,
+            executionLog: executionLog,
             invocationReceipt: receipt,
             operationDirectoryURL: invocation.operationDirectoryURL,
             processCompletion: completion,
@@ -310,6 +367,7 @@ public struct BazelOperationExecutor: Sendable {
           error,
           bep: bep,
           configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion
@@ -324,6 +382,7 @@ public struct BazelOperationExecutor: Sendable {
             phase: .bepValidation,
             message: "Bazel reported a failed terminal build event."
           ),
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -334,6 +393,7 @@ public struct BazelOperationExecutor: Sendable {
         return BazelOperationExecutionResult(
           bep: bep,
           configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -345,6 +405,7 @@ public struct BazelOperationExecutor: Sendable {
         return BazelOperationExecutionResult(
           bep: bep,
           configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -360,6 +421,7 @@ public struct BazelOperationExecutor: Sendable {
         return BazelOperationExecutionResult(
           bep: bep,
           configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -370,6 +432,7 @@ public struct BazelOperationExecutor: Sendable {
         return BazelOperationExecutionResult(
           bep: bep,
           configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion,
@@ -381,6 +444,7 @@ public struct BazelOperationExecutor: Sendable {
           error,
           bep: bep,
           configuredActionGraph: configuredActionGraph,
+          executionLog: executionLog,
           invocationReceipt: receipt,
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion
@@ -419,6 +483,7 @@ public struct BazelOperationExecutor: Sendable {
     _ error: any Error,
     bep: BEPValidation? = nil,
     configuredActionGraph: ConfiguredActionGraphValidation? = nil,
+    executionLog: BazelExecutionLogValidation? = nil,
     invocationReceipt: InvocationReceipt? = nil,
     operationDirectoryURL: URL? = nil,
     processCompletion: ProcessCompletion? = nil
@@ -430,6 +495,7 @@ public struct BazelOperationExecutor: Sendable {
         phase: phase,
         message: error.localizedDescription
       ),
+      executionLog: executionLog,
       invocationReceipt: invocationReceipt,
       operationDirectoryURL: operationDirectoryURL,
       processCompletion: processCompletion,

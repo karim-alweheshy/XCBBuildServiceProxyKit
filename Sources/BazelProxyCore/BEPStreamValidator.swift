@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 public struct BEPActionCompleted: Equatable, Sendable {
+  public let commandLineDisplayString: String?
   public let configuration: String
   public let identity: String
   public let label: String
@@ -10,6 +11,7 @@ public struct BEPActionCompleted: Equatable, Sendable {
   public let succeeded: Bool?
 
   public init(
+    commandLineDisplayString: String? = nil,
     configuration: String,
     identity: String,
     label: String,
@@ -17,6 +19,7 @@ public struct BEPActionCompleted: Equatable, Sendable {
     primaryOutput: String,
     succeeded: Bool?
   ) {
+    self.commandLineDisplayString = commandLineDisplayString
     self.configuration = configuration
     self.identity = identity
     self.label = label
@@ -39,6 +42,7 @@ extension BEPEvent {
     let components = identity.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
     return .actionCompleted(
       BEPActionCompleted(
+        commandLineDisplayString: nil,
         configuration: components.count > 2 ? String(components[2]) : "",
         identity: identity,
         label: components.first.map(String.init) ?? "",
@@ -319,9 +323,16 @@ public struct BEPStreamValidator: Sendable {
         failedActionIDs.insert(identity)
       }
       let mnemonic = (payload?["type"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+      let commandLineDisplayString: String?
+      if let commandLine = payload?["commandLine"] as? [String] {
+        commandLineDisplayString = BazelCommandDisplay.sanitize(commandLine)
+      } else {
+        commandLineDisplayString = nil
+      }
       events.append(
         .actionCompleted(
           BEPActionCompleted(
+            commandLineDisplayString: commandLineDisplayString,
             configuration: configuration,
             identity: identity,
             label: label,

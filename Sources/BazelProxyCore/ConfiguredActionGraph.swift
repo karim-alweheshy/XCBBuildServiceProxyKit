@@ -18,6 +18,7 @@ struct BazelActionReconciliationKey: Hashable, Sendable {
 }
 
 public struct BazelConfiguredAction: Equatable, Hashable, Sendable {
+  public let commandLineDisplayString: String?
   public let configuration: String
   public let identity: String
   public let label: String
@@ -25,11 +26,13 @@ public struct BazelConfiguredAction: Equatable, Hashable, Sendable {
   public let primaryOutput: String
 
   public init(
+    commandLineDisplayString: String? = nil,
     configuration: String,
     label: String,
     mnemonic: String,
     primaryOutput: String
   ) {
+    self.commandLineDisplayString = commandLineDisplayString
     self.configuration = configuration
     self.label = label
     self.mnemonic = mnemonic
@@ -49,11 +52,14 @@ extension BEPActionCompleted {
 }
 
 public enum BazelActionDisposition: Equatable, Sendable {
-  case executed(succeeded: Bool)
+  case cacheHit(BazelCacheKind)
+  case completed(succeeded: Bool)
+  case executed(succeeded: Bool, runner: String?)
   case upToDate
 }
 
 public struct BazelPresentedAction: Equatable, Sendable {
+  public let commandLineDisplayString: String?
   public let configuration: String
   public let disposition: BazelActionDisposition
   public let identity: String
@@ -61,16 +67,36 @@ public struct BazelPresentedAction: Equatable, Sendable {
   public let mnemonic: String?
   public let primaryOutput: String
 
-  public init(completed action: BEPActionCompleted) {
+  public init(
+    completed action: BEPActionCompleted,
+    configured: BazelConfiguredAction? = nil,
+    executionRecord: BazelExecutionRecord? = nil
+  ) {
+    self.commandLineDisplayString =
+      executionRecord?.commandLineDisplayString
+      ?? action.commandLineDisplayString
+      ?? configured?.commandLineDisplayString
     self.configuration = action.configuration
-    self.disposition = .executed(succeeded: action.succeeded == true)
+    if action.succeeded == false {
+      self.disposition = .completed(succeeded: false)
+    } else if let executionRecord, executionRecord.cacheHit {
+      self.disposition = .cacheHit(executionRecord.cacheKind)
+    } else if let executionRecord {
+      self.disposition = .executed(
+        succeeded: action.succeeded == true,
+        runner: executionRecord.runner
+      )
+    } else {
+      self.disposition = .completed(succeeded: action.succeeded == true)
+    }
     self.identity = action.identity
     self.label = action.label
-    self.mnemonic = action.mnemonic
+    self.mnemonic = configured?.mnemonic ?? action.mnemonic ?? executionRecord?.mnemonic
     self.primaryOutput = action.primaryOutput
   }
 
   public init(upToDate action: BazelConfiguredAction) {
+    self.commandLineDisplayString = action.commandLineDisplayString
     self.configuration = action.configuration
     self.disposition = .upToDate
     self.identity = action.identity
@@ -78,14 +104,84 @@ public struct BazelPresentedAction: Equatable, Sendable {
     self.mnemonic = action.mnemonic
     self.primaryOutput = action.primaryOutput
   }
+
+  public init(configured action: BazelConfiguredAction, executionRecord: BazelExecutionRecord) {
+    self.commandLineDisplayString =
+      executionRecord.commandLineDisplayString ?? action.commandLineDisplayString
+    self.configuration = action.configuration
+    if executionRecord.cacheHit {
+      self.disposition = .cacheHit(executionRecord.cacheKind)
+    } else {
+      self.disposition = .executed(
+        succeeded: executionRecord.exitCode.map { $0 == 0 } ?? true,
+        runner: executionRecord.runner
+      )
+    }
+    self.identity = action.identity
+    self.label = action.label
+    self.mnemonic = action.mnemonic
+    self.primaryOutput = action.primaryOutput
+  }
+
+  public var taskTitle: String {
+    let outputName = URL(fileURLWithPath: primaryOutput).lastPathComponent
+    let labelName = label.split(separator: ":", omittingEmptySubsequences: false).last.map(
+      String.init)
+    switch mnemonic {
+    case "SwiftCompile":
+      let module =
+        outputName.hasSuffix(".swiftmodule")
+        ? String(outputName.dropLast(".swiftmodule".count))
+        : labelName ?? outputName
+      return "Compile Swift module \(module)"
+    case "CppArchive":
+      var archive = outputName.hasSuffix(".a") ? String(outputName.dropLast(2)) : outputName
+      if archive.hasPrefix("lib") { archive.removeFirst(3) }
+      return "Archive \(archive.isEmpty ? (labelName ?? "Bazel target") : archive)"
+    case "ObjcLink":
+      return "Link \(outputName.isEmpty ? (labelName ?? "Bazel target") : outputName)"
+    case "BundleTreeApp":
+      return "Assemble \(outputName.isEmpty ? (labelName ?? "app") : outputName)"
+    case "Symlink":
+      return "Create symlink \(outputName.isEmpty ? (labelName ?? "output") : outputName)"
+    case "BazelWorkspaceStatusAction":
+      return "Update Bazel workspace status"
+    case "FileWrite":
+      return "Write \(outputName.isEmpty ? (labelName ?? "generated file") : outputName)"
+    case "CompileRootInfoPlist":
+      return "Process Info.plist"
+    case "ProcessEntitlementsFiles":
+      return "Process entitlements"
+    case "ProcessDEREntitlements":
+      return "Process DER entitlements"
+    case "ProcessSimulatorEntitlementsFile":
+      return "Process simulator entitlements"
+    case "Action":
+      return "Generate \(outputName.isEmpty ? (labelName ?? "Bazel output") : outputName)"
+    case .some(let mnemonic):
+      return outputName.isEmpty ? mnemonic : "\(mnemonic) \(outputName)"
+    case nil:
+      return outputName.isEmpty ? "Bazel action" : "Bazel action \(outputName)"
+    }
+  }
 }
 
 public struct BazelActionPresentationSummary: Equatable, Sendable {
+  public let cacheHits: Int
+  public let completedStatusUnavailable: Int
   public let executed: Int
   public let presented: Int
   public let upToDate: Int
 
-  public init(executed: Int, presented: Int, upToDate: Int) {
+  public init(
+    cacheHits: Int = 0,
+    completedStatusUnavailable: Int = 0,
+    executed: Int,
+    presented: Int,
+    upToDate: Int
+  ) {
+    self.cacheHits = cacheHits
+    self.completedStatusUnavailable = completedStatusUnavailable
     self.executed = executed
     self.presented = presented
     self.upToDate = upToDate
@@ -98,10 +194,15 @@ public struct ConfiguredActionGraphValidation: Equatable, Sendable {
 }
 
 public struct ConfiguredActionGraphLimits: Equatable, Sendable {
+  public let command: BazelCommandDisplayLimits
   public let maximumFileBytes: Int
 
-  public init(maximumFileBytes: Int = 256 * 1024 * 1024) {
+  public init(
+    maximumFileBytes: Int = 256 * 1024 * 1024,
+    command: BazelCommandDisplayLimits = BazelCommandDisplayLimits()
+  ) {
     self.maximumFileBytes = maximumFileBytes
+    self.command = command
   }
 }
 
@@ -143,9 +244,9 @@ public enum ConfiguredActionGraphError: LocalizedError, Equatable, Sendable {
   }
 }
 
-/// Loads only the structural allowlist needed to recover the selected product's configured action
-/// closure. Command lines, environment variables, execution properties, and file contents in the
-/// raw aquery JSON are intentionally not represented by the decoding model.
+/// Loads only the structural allowlist and command arguments needed to present the selected
+/// product's configured action closure. Environment variables, execution properties, inputs, and
+/// file contents in the raw aquery JSON are intentionally not represented by the decoding model.
 public enum ConfiguredActionGraphValidator {
   public static func validate(
     fileAt url: URL,
@@ -153,7 +254,11 @@ public enum ConfiguredActionGraphValidator {
     configurations: Set<String>,
     limits: ConfiguredActionGraphLimits = ConfiguredActionGraphLimits()
   ) throws -> ConfiguredActionGraphValidation {
-    guard limits.maximumFileBytes > 0 else {
+    guard limits.maximumFileBytes > 0,
+      limits.command.maximumArgumentBytes > 0,
+      limits.command.maximumArgumentCount > 0,
+      limits.command.maximumDisplayBytes > 0
+    else {
       throw ConfiguredActionGraphError.invalidLimits
     }
     let data = try read(url, maximumBytes: limits.maximumFileBytes)
@@ -163,7 +268,7 @@ public enum ConfiguredActionGraphValidator {
     } catch {
       throw ConfiguredActionGraphError.invalidShape
     }
-    let resolver = try ActionGraphResolver(container: container)
+    let resolver = try ActionGraphResolver(container: container, commandLimits: limits.command)
     let actions = try resolver.actions(
       producing: productPaths,
       configurations: configurations
@@ -225,10 +330,11 @@ private final class ActionGraphResolver {
   private let pathFragments: [Int: ActionGraphPathFragment]
   private let producers: [Int: Int]
   private let targets: [Int: String]
+  private let commandLimits: BazelCommandDisplayLimits
   private var depSetCache = [Int: [Int]]()
   private var depSetVisits = [Int: VisitState]()
 
-  init(container: ActionGraphContainer) throws {
+  init(container: ActionGraphContainer, commandLimits: BazelCommandDisplayLimits) throws {
     self.actions = container.actions
     self.artifacts = try Self.uniqueMap(container.artifacts, identifier: \.id)
     self.configurations = try Self.uniqueMap(container.configurations, identifier: \.id)
@@ -236,6 +342,7 @@ private final class ActionGraphResolver {
     self.depSets = try Self.uniqueMap(container.depSets, identifier: \.id)
     self.pathFragments = try Self.uniqueMap(container.pathFragments, identifier: \.id)
     self.targets = try Self.uniqueMap(container.targets, identifier: \.id).mapValues(\.label)
+    self.commandLimits = commandLimits
 
     var producers = [Int: Int]()
     for (actionIndex, action) in container.actions.enumerated() {
@@ -309,11 +416,19 @@ private final class ActionGraphResolver {
       guard let label = targets[action.targetID],
         let primaryOutputID = action.primaryOutputID,
         let primaryOutput = artifactPaths[primaryOutputID],
-        !action.mnemonic.isEmpty
+        !action.mnemonic.isEmpty,
+        !BuildProxySecurity.hasControlCharacters(label),
+        !BuildProxySecurity.hasControlCharacters(action.mnemonic),
+        !BuildProxySecurity.hasControlCharacters(primaryOutput)
       else {
         throw ConfiguredActionGraphError.invalidShape
       }
+      let commandLineDisplayString = BazelCommandDisplay.sanitize(
+        action.arguments,
+        limits: commandLimits
+      )
       let configured = BazelConfiguredAction(
+        commandLineDisplayString: commandLineDisplayString,
         configuration: configuration,
         label: label,
         mnemonic: action.mnemonic,
@@ -388,6 +503,7 @@ private struct ActionGraphContainer: Decodable {
 }
 
 private struct ActionGraphAction: Decodable {
+  let arguments: [String]
   let configurationID: Int
   let inputDepSetIDs: [Int]
   let mnemonic: String
@@ -396,6 +512,7 @@ private struct ActionGraphAction: Decodable {
   let targetID: Int
 
   private enum CodingKeys: String, CodingKey {
+    case arguments
     case configurationID = "configurationId"
     case inputDepSetIDs = "inputDepSetIds"
     case mnemonic
@@ -406,6 +523,7 @@ private struct ActionGraphAction: Decodable {
 
   init(from decoder: Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
+    arguments = try values.decodeIfPresent([String].self, forKey: .arguments) ?? []
     configurationID = try values.decodeIfPresent(Int.self, forKey: .configurationID) ?? -1
     inputDepSetIDs = try values.decodeIfPresent([Int].self, forKey: .inputDepSetIDs) ?? []
     mnemonic = try values.decodeIfPresent(String.self, forKey: .mnemonic) ?? ""

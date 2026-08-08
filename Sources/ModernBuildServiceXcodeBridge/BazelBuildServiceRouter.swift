@@ -1366,15 +1366,39 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         operation.plan.targets.first { $0.mapping.bazelLabel == actionLabel }
           .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
       }
-      let actionName = action.mnemonic ?? "Bazel action"
+      let actionName = action.taskTitle
       let executionDescription: String
       let status: SwiftBuildPresentedTaskStatus
       switch action.disposition {
-      case .executed(let succeeded):
-        executionDescription = actionName
+      case .cacheHit(let kind):
+        switch kind {
+        case .disk:
+          executionDescription = "\(actionName) — Disk cache hit"
+        case .remote:
+          executionDescription = "\(actionName) — Remote cache hit"
+        case .other:
+          executionDescription = "\(actionName) — Cache hit"
+        }
+        status = .succeeded
+      case .completed(let succeeded):
+        executionDescription = "\(actionName) — Completed (cache status unavailable)"
+        status = succeeded ? .succeeded : .failed
+      case .executed(let succeeded, let runner):
+        let executionState: String
+        switch runner?.lowercased() {
+        case .some(let value) where value.contains("remote"):
+          executionState = "Executed remotely"
+        case .some(let value) where value.contains("local") || value.contains("sandbox"):
+          executionState = "Executed locally"
+        case .some(let value) where value.contains("worker"):
+          executionState = "Executed with worker"
+        default:
+          executionState = "Executed"
+        }
+        executionDescription = "\(actionName) — \(executionState)"
         status = succeeded ? .succeeded : .failed
       case .upToDate:
-        executionDescription = "\(actionName) (up-to-date)"
+        executionDescription = "\(actionName) — Up to date (cache source unavailable)"
         status = .succeeded
       }
       let ruleInfo = [
@@ -1387,7 +1411,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       try send(
         SwiftBuildOperationPresenter.encodeTaskStarted(
           SwiftBuildPresentedTask(
-            commandLineDisplayString: nil,
+            commandLineDisplayString: action.commandLineDisplayString,
             executionDescription: executionDescription,
             id: taskID,
             interestingPath: nil,
@@ -1422,7 +1446,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       try send(
         SwiftBuildOperationPresenter.encodeProgressUpdated(
           statusMessage:
-            "Bazel presented \(summary.presented) \(Self.actionWord(summary.presented)): \(summary.executed) executed, \(summary.upToDate) up-to-date",
+            "Bazel presented \(summary.presented) \(Self.actionWord(summary.presented)): \(summary.executed) executed, \(summary.cacheHits) cache hits, \(summary.completedStatusUnavailable) completed (cache status unavailable), \(summary.upToDate) up-to-date",
           percentComplete: 100,
           showInLog: true
         ),

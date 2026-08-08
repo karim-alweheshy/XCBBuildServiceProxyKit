@@ -151,6 +151,7 @@ final class OwnedProcessSupervisorTests: XCTestCase {
       arguments: ["--forbidden"],
       bepURL: invocation.bepURL,
       environment: invocation.environment,
+      executionLogURL: invocation.executionLogURL,
       executableURL: invocation.executableURL,
       operationDirectoryURL: invocation.operationDirectoryURL,
       receiptURL: invocation.receiptURL,

@@ -21,6 +21,8 @@ final class ConfiguredActionGraphTests: XCTestCase {
       validation.actions,
       [
         BazelConfiguredAction(
+          commandLineDisplayString:
+            "swiftc --remote_header '<redacted>' 'https://<redacted>@example.invalid/App.swift'",
           configuration: "sim",
           label: "//app:App.library",
           mnemonic: "SwiftCompile",
@@ -108,6 +110,7 @@ final class ConfiguredActionGraphTests: XCTestCase {
       "actions": [
         {
           "configurationId": 1,
+          "arguments": ["swiftc","--remote_header","Authorization=Bearer do-not-retain-command-secret","https://user:password@example.invalid/App.swift"],
           "environmentVariables": [{"key":"TOKEN","value":"do-not-retain-action-graph-secret"}],
           "mnemonic": "SwiftCompile",
           "outputIds": [1],
