@@ -17,13 +17,20 @@ let package = Package(
   ],
   dependencies: [
     .package(
+      url: "https://github.com/facebook/zstd.git",
+      exact: "1.5.7"
+    ),
+    .package(
       url: "https://github.com/swiftlang/swift-build.git",
       revision: "e4f6fc77ebe727657dadfedf50462f5a1a626ead"
-    )
+    ),
   ],
   targets: [
     .target(
       name: "BazelProxyCore",
+      dependencies: [
+        .product(name: "libzstd", package: "zstd")
+      ],
       path: "Sources/BazelProxyCore"
     ),
     .target(
@@ -63,8 +70,12 @@ let package = Package(
     ),
     .testTarget(
       name: "BazelProxyCoreTests",
-      dependencies: ["BazelProxyCore"],
-      path: "Tests/BazelProxyCoreTests"
+      dependencies: [
+        "BazelProxyCore",
+        .product(name: "libzstd", package: "zstd"),
+      ],
+      path: "Tests/BazelProxyCoreTests",
+      resources: [.copy("Fixtures")]
     ),
   ],
   swiftLanguageModes: [.v5]

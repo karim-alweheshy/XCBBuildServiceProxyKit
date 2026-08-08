@@ -210,45 +210,69 @@ public struct BazelExecutionLogValidation: Equatable, Sendable {
 
 public struct BazelExecutionLogLimits: Equatable, Sendable {
   public let command: BazelCommandDisplayLimits
+  public let maximumDecodedBytes: Int
   public let maximumFileBytes: Int
   public let maximumLineBytes: Int
+  public let maximumRecordCount: Int
 
   public init(
     maximumFileBytes: Int = 256 * 1024 * 1024,
     maximumLineBytes: Int = 64 * 1024 * 1024,
+    maximumDecodedBytes: Int = 512 * 1024 * 1024,
+    maximumRecordCount: Int = 1_000_000,
     command: BazelCommandDisplayLimits = BazelCommandDisplayLimits()
   ) {
+    self.maximumDecodedBytes = maximumDecodedBytes
     self.maximumFileBytes = maximumFileBytes
     self.maximumLineBytes = maximumLineBytes
+    self.maximumRecordCount = maximumRecordCount
     self.command = command
   }
 }
 
 public enum BazelExecutionLogError: LocalizedError, Equatable, Sendable {
   case ambiguousRecord(label: String, output: String)
+  case compactDecodedLimitExceeded(Int)
+  case compactRecordLimitExceeded(Int)
+  case conflictingCompactEntryID(UInt32)
   case fileLimitExceeded(Int)
   case invalidLimits
   case lineLimitExceeded(Int)
+  case malformedCompactLog
   case malformedJSONLine
+  case missingCompactOutputReference(UInt32)
   case readFailed(errno: Int32)
   case unsafeFile(String)
+  case wrongCompactOutputReference(UInt32)
 
   public var errorDescription: String? {
     switch self {
     case .ambiguousRecord(let label, let output):
       return "The Bazel execution log ambiguously repeats \(label) output \(output)."
+    case .compactDecodedLimitExceeded(let limit):
+      return "The Bazel compact execution log exceeds the \(limit)-byte decoded limit."
+    case .compactRecordLimitExceeded(let limit):
+      return "The Bazel compact execution log exceeds the \(limit)-record limit."
+    case .conflictingCompactEntryID(let identifier):
+      return "The Bazel compact execution log conflicts on entry ID \(identifier)."
     case .fileLimitExceeded(let limit):
       return "The Bazel execution log exceeds the \(limit)-byte file limit."
     case .invalidLimits:
       return "The Bazel execution-log limits are invalid."
     case .lineLimitExceeded(let limit):
       return "The Bazel execution log contains a record larger than \(limit) bytes."
+    case .malformedCompactLog:
+      return "The Bazel compact execution log is malformed or truncated."
     case .malformedJSONLine:
       return "The Bazel execution log contains malformed JSON."
+    case .missingCompactOutputReference(let identifier):
+      return "The Bazel compact execution log references missing output ID \(identifier)."
     case .readFailed(let errorNumber):
       return "The Bazel execution log read failed with errno \(errorNumber)."
     case .unsafeFile(let path):
       return "The Bazel execution log is missing, linked, non-regular, or oversized: \(path)"
+    case .wrongCompactOutputReference(let identifier):
+      return "The Bazel compact execution log output ID \(identifier) has the wrong entry type."
     }
   }
 }
@@ -260,6 +284,8 @@ public enum BazelExecutionLogValidator {
   ) throws -> BazelExecutionLogValidation {
     guard limits.maximumLineBytes > 0,
       limits.maximumFileBytes >= limits.maximumLineBytes,
+      limits.maximumDecodedBytes > 0,
+      limits.maximumRecordCount > 0,
       limits.command.maximumArgumentBytes > 0,
       limits.command.maximumArgumentCount > 0,
       limits.command.maximumDisplayBytes > 0
@@ -299,8 +325,42 @@ public enum BazelExecutionLogValidator {
       data.append(contentsOf: buffer.prefix(count))
     }
 
-    var records = [BazelExecutionRecord]()
+    let records: [BazelExecutionRecord]
+    let malformedRecordError: BazelExecutionLogError
+    if data.starts(with: [0x28, 0xB5, 0x2F, 0xFD]) {
+      records = try BazelCompactExecutionLogDecoder.decode(data, limits: limits)
+      malformedRecordError = .malformedCompactLog
+    } else {
+      records = try decodeJSON(data, limits: limits)
+      malformedRecordError = .malformedJSONLine
+    }
+
     var recordsByKey = [BazelActionReconciliationKey: BazelExecutionRecord]()
+    for record in records {
+      try validate(record, limits: limits, malformedRecordError: malformedRecordError)
+      for output in record.listedOutputs {
+        let key = BazelActionReconciliationKey(label: record.targetLabel, primaryOutput: output)
+        if let existing = recordsByKey[key] {
+          guard reconciliationEquivalent(existing, record) else {
+            throw BazelExecutionLogError.ambiguousRecord(label: key.label, output: output)
+          }
+        } else {
+          recordsByKey[key] = record
+        }
+      }
+    }
+    return BazelExecutionLogValidation(
+      fileBytes: data.count,
+      records: records,
+      recordsByKey: recordsByKey
+    )
+  }
+
+  private static func decodeJSON(
+    _ data: Data,
+    limits: BazelExecutionLogLimits
+  ) throws -> [BazelExecutionRecord] {
+    var records = [BazelExecutionRecord]()
     for recordRange in try splitJSONSequence(
       data,
       maximumRecordBytes: limits.maximumLineBytes
@@ -325,37 +385,30 @@ public enum BazelExecutionLogValidator {
         status: raw.status?.nilIfEmpty,
         targetLabel: raw.targetLabel
       )
-      let boundedFields =
-        [record.targetLabel] + record.listedOutputs
-        + [record.mnemonic, record.runner, record.status].compactMap { $0 }
-      guard record.listedOutputs.count <= limits.command.maximumArgumentCount,
-        boundedFields.allSatisfy({
-          $0.utf8.count <= limits.command.maximumArgumentBytes
-            && !BuildProxySecurity.hasControlCharacters($0)
-        })
-      else { throw BazelExecutionLogError.malformedJSONLine }
-      if record.cacheHit {
-        guard record.exitCode.map({ $0 == 0 }) ?? true,
-          record.status == nil
-        else { throw BazelExecutionLogError.malformedJSONLine }
-      }
-      for output in record.listedOutputs {
-        let key = BazelActionReconciliationKey(label: record.targetLabel, primaryOutput: output)
-        if let existing = recordsByKey[key] {
-          guard reconciliationEquivalent(existing, record) else {
-            throw BazelExecutionLogError.ambiguousRecord(label: key.label, output: output)
-          }
-        } else {
-          recordsByKey[key] = record
-        }
-      }
       records.append(record)
     }
-    return BazelExecutionLogValidation(
-      fileBytes: data.count,
-      records: records,
-      recordsByKey: recordsByKey
-    )
+    return records
+  }
+
+  private static func validate(
+    _ record: BazelExecutionRecord,
+    limits: BazelExecutionLogLimits,
+    malformedRecordError: BazelExecutionLogError
+  ) throws {
+    let boundedFields =
+      [record.targetLabel] + record.listedOutputs
+      + [record.mnemonic, record.runner, record.status].compactMap { $0 }
+    guard record.listedOutputs.count <= limits.command.maximumArgumentCount,
+      boundedFields.allSatisfy({
+        $0.utf8.count <= limits.command.maximumArgumentBytes
+          && !BuildProxySecurity.hasControlCharacters($0)
+      })
+    else { throw malformedRecordError }
+    if record.cacheHit {
+      guard record.exitCode.map({ $0 == 0 }) ?? true,
+        record.status == nil
+      else { throw malformedRecordError }
+    }
   }
 
   /// Bazel 9 writes `--execution_log_json_file` as consecutive, pretty-printed top-level JSON
