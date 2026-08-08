@@ -40,18 +40,18 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
   private static let auxiliaryChannelLowerBound = UInt64(1) << 63
 
   public static let fixedPlanRoleKeys = [
-    "BAZEL_LABEL",
-    "BAZEL_TARGET_ID",
-    "BAZEL_INTEGRATION_DIR",
-    "BAZEL_OUT",
-    "BAZEL_WORKSPACE_ROOT",
-    "SRCROOT",
-    "TARGET_BUILD_DIR",
-    "FULL_PRODUCT_NAME",
-    "TARGET_NAME",
-    "PROJECT_NAME",
-    "PROJECT_FILE_PATH",
-    "ENABLE_PREVIEWS",
+    ResolvedBuildPlanSettingRole.bazelLabel.rawValue,
+    ResolvedBuildPlanSettingRole.bazelTargetID.rawValue,
+    ResolvedBuildPlanSettingRole.bazelIntegrationDirectory.rawValue,
+    ResolvedBuildPlanSettingRole.bazelOutputDirectory.rawValue,
+    ResolvedBuildPlanSettingRole.bazelWorkspaceRoot.rawValue,
+    ResolvedBuildPlanSettingRole.sourceRoot.rawValue,
+    ResolvedBuildPlanSettingRole.targetBuildDirectory.rawValue,
+    ResolvedBuildPlanSettingRole.fullProductName.rawValue,
+    ResolvedBuildPlanSettingRole.targetName.rawValue,
+    ResolvedBuildPlanSettingRole.projectName.rawValue,
+    ResolvedBuildPlanSettingRole.projectFilePath.rawValue,
+    ResolvedBuildPlanSettingRole.previewsEnabled.rawValue,
   ]
 
   private static let targetScopedKeys: Set<String> = [
