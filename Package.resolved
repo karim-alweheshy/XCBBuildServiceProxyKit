@@ -1,5 +1,5 @@
 {
-  "originHash" : "6a30e69b7a11c76020192495eb7422766135c023ca96311a56d63af5aa02141a",
+  "originHash" : "54d94388afa183aaba493cfd931e9361f754e430d6e5182a7ad477d67f2fc2c4",
   "pins" : [
     {
       "identity" : "swift-argument-parser",
@@ -70,6 +70,15 @@
       "state" : {
         "branch" : "main",
         "revision" : "a9db0b4a38e30164c7173e1700e06f29fc5627b5"
+      }
+    },
+    {
+      "identity" : "zstd",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/facebook/zstd.git",
+      "state" : {
+        "revision" : "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+        "version" : "1.5.7"
       }
     }
   ],
