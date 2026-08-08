@@ -1,0 +1,340 @@
+import Darwin
+import Foundation
+
+public enum BEPEvent: Equatable, Sendable {
+  case actionCompleted(identity: String, succeeded: Bool?)
+  case progress(ProxyProgress)
+  case reportedExecutedActionCount(Int)
+  case targetCompleted(label: String, succeeded: Bool)
+  case finished(succeeded: Bool)
+}
+
+public struct BEPResult: Equatable, Sendable {
+  public let completedActionIDs: Set<String>
+  public let failedActionIDs: Set<String>
+  public let failedTargetLabels: Set<String>
+  public let reportedExecutedActionCount: Int?
+  public let succeeded: Bool
+
+  public init(
+    completedActionIDs: Set<String>,
+    failedActionIDs: Set<String>,
+    failedTargetLabels: Set<String>,
+    reportedExecutedActionCount: Int?,
+    succeeded: Bool
+  ) {
+    self.completedActionIDs = completedActionIDs
+    self.failedActionIDs = failedActionIDs
+    self.failedTargetLabels = failedTargetLabels
+    self.reportedExecutedActionCount = reportedExecutedActionCount
+    self.succeeded = succeeded
+  }
+}
+
+public struct BEPValidation: Equatable, Sendable {
+  public let events: [BEPEvent]
+  public let result: BEPResult
+}
+
+public struct BEPFinalization: Equatable, Sendable {
+  public let events: [BEPEvent]
+  public let result: BEPResult
+}
+
+public struct BEPStreamLimits: Equatable, Sendable {
+  public let maximumFileBytes: Int
+  public let maximumLineBytes: Int
+
+  public init(
+    maximumFileBytes: Int = 256 * 1024 * 1024,
+    maximumLineBytes: Int = 1024 * 1024
+  ) {
+    self.maximumFileBytes = maximumFileBytes
+    self.maximumLineBytes = maximumLineBytes
+  }
+}
+
+public enum BEPStreamError: LocalizedError, Equatable, Sendable {
+  case actionIdentityIsMissing
+  case consumedAfterFinish
+  case contradictoryTerminalResult
+  case duplicateActionIdentity(String)
+  case duplicateFinishedEvent
+  case fileLimitExceeded(Int)
+  case invalidCount(String)
+  case invalidLimits
+  case lineLimitExceeded(Int)
+  case malformedJSONLine
+  case missingFinishedEvent
+  case readFailed(errno: Int32)
+  case unsafeFile(String)
+  case validatorAlreadyFinished
+
+  public var errorDescription: String? {
+    switch self {
+    case .actionIdentityIsMissing:
+      return "A BEP action-completed event has no stable identity."
+    case .consumedAfterFinish:
+      return "BEP bytes were supplied after validation finished."
+    case .contradictoryTerminalResult:
+      return "BEP reports success together with a failed action or target."
+    case .duplicateActionIdentity(let identity):
+      return "BEP repeats the action-completed identity \(identity)."
+    case .duplicateFinishedEvent:
+      return "BEP contains more than one finished event."
+    case .fileLimitExceeded(let limit):
+      return "BEP exceeds the \(limit)-byte file limit."
+    case .invalidCount(let field):
+      return "BEP contains an invalid nonnegative count for \(field)."
+    case .invalidLimits:
+      return "BEP stream limits must be positive and the file limit must cover one line."
+    case .lineLimitExceeded(let limit):
+      return "BEP contains a line larger than the \(limit)-byte line limit."
+    case .malformedJSONLine:
+      return "BEP contains an empty, malformed, or non-object JSON line."
+    case .missingFinishedEvent:
+      return "BEP does not contain exactly one finished event."
+    case .readFailed(let errorNumber):
+      return "BEP descriptor read failed with errno \(errorNumber)."
+    case .unsafeFile(let path):
+      return "BEP is missing, linked, non-regular, or oversized: \(path)"
+    case .validatorAlreadyFinished:
+      return "BEP validation was finished more than once."
+    }
+  }
+}
+
+/// Incrementally parses only a safe allowlist from Bazel's JSONL build-event stream.
+public struct BEPStreamValidator: Sendable {
+  private let limits: BEPStreamLimits
+  private var completedActionIDs = Set<String>()
+  private var failedActionIDs = Set<String>()
+  private var failedTargetLabels = Set<String>()
+  private var finishedResult: Bool?
+  private var isFinished = false
+  private var pending = Data()
+  private var reportedExecutedActionCount: Int?
+  private var totalBytes = 0
+
+  public init(limits: BEPStreamLimits = BEPStreamLimits()) throws {
+    guard limits.maximumLineBytes > 0,
+      limits.maximumFileBytes >= limits.maximumLineBytes
+    else {
+      throw BEPStreamError.invalidLimits
+    }
+    self.limits = limits
+  }
+
+  public mutating func consume(_ bytes: Data) throws -> [BEPEvent] {
+    guard !isFinished else { throw BEPStreamError.consumedAfterFinish }
+    guard bytes.count <= limits.maximumFileBytes - totalBytes else {
+      throw BEPStreamError.fileLimitExceeded(limits.maximumFileBytes)
+    }
+    totalBytes += bytes.count
+
+    var events = [BEPEvent]()
+    var start = bytes.startIndex
+    while let newline = bytes[start...].firstIndex(of: 0x0A) {
+      try appendPending(bytes[start..<newline])
+      events.append(contentsOf: try parsePendingLine())
+      start = bytes.index(after: newline)
+    }
+    try appendPending(bytes[start...])
+    return events
+  }
+
+  public mutating func finish() throws -> BEPResult {
+    try finishWithEvents().result
+  }
+
+  public mutating func finishWithEvents() throws -> BEPFinalization {
+    guard !isFinished else { throw BEPStreamError.validatorAlreadyFinished }
+    isFinished = true
+    var finalEvents = [BEPEvent]()
+    if !pending.isEmpty {
+      finalEvents = try parsePendingLine()
+    }
+    guard let succeeded = finishedResult else {
+      throw BEPStreamError.missingFinishedEvent
+    }
+    guard !succeeded || (failedActionIDs.isEmpty && failedTargetLabels.isEmpty) else {
+      throw BEPStreamError.contradictoryTerminalResult
+    }
+    return BEPFinalization(
+      events: finalEvents,
+      result: BEPResult(
+        completedActionIDs: completedActionIDs,
+        failedActionIDs: failedActionIDs,
+        failedTargetLabels: failedTargetLabels,
+        reportedExecutedActionCount: reportedExecutedActionCount,
+        succeeded: succeeded
+      )
+    )
+  }
+
+  /// Reads a completed BEP through one no-follow descriptor while preserving incremental bounds.
+  public static func validate(
+    fileAt url: URL,
+    limits: BEPStreamLimits = BEPStreamLimits()
+  ) throws -> BEPValidation {
+    var validator = try BEPStreamValidator(limits: limits)
+    guard url.isFileURL, url.path.hasPrefix("/") else {
+      throw BEPStreamError.unsafeFile(url.absoluteString)
+    }
+    let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+      guard let path else { return -1 }
+      return Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    }
+    guard descriptor >= 0 else { throw BEPStreamError.unsafeFile(url.path) }
+    defer { Darwin.close(descriptor) }
+
+    var status = stat()
+    guard Darwin.fstat(descriptor, &status) == 0,
+      status.st_mode & S_IFMT == S_IFREG,
+      status.st_size >= 0,
+      status.st_size <= limits.maximumFileBytes
+    else {
+      throw BEPStreamError.unsafeFile(url.path)
+    }
+
+    var events = [BEPEvent]()
+    var buffer = [UInt8](repeating: 0, count: min(64 * 1024, limits.maximumFileBytes))
+    while true {
+      let count = Darwin.read(descriptor, &buffer, buffer.count)
+      if count == 0 { break }
+      if count < 0 {
+        if errno == EINTR { continue }
+        throw BEPStreamError.readFailed(errno: errno)
+      }
+      events.append(contentsOf: try validator.consume(Data(buffer.prefix(count))))
+    }
+    let finalization = try validator.finishWithEvents()
+    events.append(contentsOf: finalization.events)
+    return BEPValidation(events: events, result: finalization.result)
+  }
+
+  private mutating func appendPending(_ bytes: Data.SubSequence) throws {
+    guard bytes.count <= limits.maximumLineBytes - pending.count else {
+      throw BEPStreamError.lineLimitExceeded(limits.maximumLineBytes)
+    }
+    pending.append(contentsOf: bytes)
+  }
+
+  private mutating func parsePendingLine() throws -> [BEPEvent] {
+    defer { pending.removeAll(keepingCapacity: true) }
+    guard !pending.isEmpty,
+      let object = try? JSONSerialization.jsonObject(with: pending) as? [String: Any]
+    else {
+      throw BEPStreamError.malformedJSONLine
+    }
+
+    var events = [BEPEvent]()
+    if let progress = object["progress"] as? [String: Any],
+      let standardError = progress["stderr"] as? String,
+      let fraction = Self.parseProgress(in: standardError)
+    {
+      events.append(
+        .progress(
+          ProxyProgress(
+            completed: fraction.completed,
+            source: .interactiveHint,
+            total: fraction.total
+          )
+        )
+      )
+    }
+
+    if let metrics = object["buildMetrics"] as? [String: Any],
+      let summary = metrics["actionSummary"] as? [String: Any],
+      summary.keys.contains("actionsExecuted")
+    {
+      guard let count = Self.nonnegativeInteger(summary["actionsExecuted"]) else {
+        throw BEPStreamError.invalidCount("buildMetrics.actionSummary.actionsExecuted")
+      }
+      if let previous = reportedExecutedActionCount, previous != count {
+        throw BEPStreamError.invalidCount("buildMetrics.actionSummary.actionsExecuted")
+      }
+      reportedExecutedActionCount = count
+      events.append(.reportedExecutedActionCount(count))
+    }
+
+    if let identifier = object["id"] as? [String: Any],
+      let action = identifier["actionCompleted"] as? [String: Any]
+    {
+      let label = action["label"] as? String ?? ""
+      let primaryOutput = action["primaryOutput"] as? String ?? ""
+      let configuration =
+        action["configuration"] as? String
+        ?? (action["configuration"] as? [String: Any])?["id"] as? String
+        ?? ""
+      let identity = [label, primaryOutput, configuration].joined(separator: "|")
+      guard identity != "||" else { throw BEPStreamError.actionIdentityIsMissing }
+      guard completedActionIDs.insert(identity).inserted else {
+        throw BEPStreamError.duplicateActionIdentity(identity)
+      }
+      let succeeded = (object["action"] as? [String: Any])?["success"] as? Bool
+      if succeeded == false {
+        failedActionIDs.insert(identity)
+      }
+      events.append(.actionCompleted(identity: identity, succeeded: succeeded))
+    }
+
+    if let identifier = object["id"] as? [String: Any],
+      let target = identifier["targetCompleted"] as? [String: Any],
+      let label = target["label"] as? String,
+      let completed = object["completed"] as? [String: Any],
+      let succeeded = completed["success"] as? Bool
+    {
+      if !succeeded {
+        failedTargetLabels.insert(label)
+      }
+      events.append(.targetCompleted(label: label, succeeded: succeeded))
+    }
+
+    if let finished = object["finished"] as? [String: Any],
+      let succeeded = finished["overallSuccess"] as? Bool
+    {
+      guard finishedResult == nil else { throw BEPStreamError.duplicateFinishedEvent }
+      finishedResult = succeeded
+      events.append(.finished(succeeded: succeeded))
+    }
+    return events
+  }
+
+  private static func parseProgress(in text: String) -> (completed: Int, total: Int)? {
+    var best: (completed: Int, total: Int)?
+    for line in text.split(whereSeparator: \Character.isNewline) {
+      guard let open = line.firstIndex(of: "["),
+        let close = line[open...].firstIndex(of: "]")
+      else { continue }
+      let fraction = line[line.index(after: open)..<close]
+        .split(separator: "/", maxSplits: 1)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+      guard fraction.count == 2,
+        let completed = Int(fraction[0]),
+        let total = Int(fraction[1]),
+        total > 0,
+        completed >= 0,
+        completed <= total
+      else { continue }
+      if best == nil || completed > best!.completed || total > best!.total {
+        best = (completed, total)
+      }
+    }
+    return best
+  }
+
+  private static func nonnegativeInteger(_ value: Any?) -> Int? {
+    if value is Bool { return nil }
+    let integer: Int?
+    if let value = value as? Int {
+      integer = value
+    } else if let value = value as? String {
+      integer = Int(value)
+    } else {
+      integer = nil
+    }
+    guard let integer, integer >= 0 else { return nil }
+    return integer
+  }
+}

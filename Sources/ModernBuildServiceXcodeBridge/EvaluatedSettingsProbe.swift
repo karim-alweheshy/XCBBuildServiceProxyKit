@@ -29,13 +29,16 @@ private enum QueryOutcome {
 
 private struct ActiveQuery {
   let channel: UInt64
-  let targetIndex: Int
-  let expectedValueCount: Int?
   var outcome: QueryOutcome?
   var responseConsumed = false
 }
 
 public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
+  // Xcode allocates positive channels monotonically from one. Keep auxiliary
+  // traffic in the high half of UInt64 and walk downward, skipping every
+  // channel already observed on either side of the relay.
+  private static let auxiliaryChannelLowerBound = UInt64(1) << 63
+
   public static let fixedPlanRoleKeys = [
     "BAZEL_LABEL",
     "BAZEL_TARGET_ID",
@@ -58,7 +61,7 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
     "TARGET_BUILD_DIR",
     "TARGET_NAME",
   ]
-  private static let stringListEnvironmentMacroNames: Set<String> = ["TOOLCHAINS"]
+  private static let requiredPlanRoleKeys = Set(fixedPlanRoleKeys)
   private static let maximumManifestBytes = 1024 * 1024
   private static let maximumEnvironmentKeyCount = 256
 
@@ -66,12 +69,12 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
   private let timeout: TimeInterval
   private let condition = NSCondition()
   private var evaluationKeys: [String] = []
-  private var scalarEvaluationKeys: [String] = []
-  private var stringListEvaluationKeys: [String] = []
   private var isEnabled = false
   private var hasAttemptedCreateBuild = false
   private var activeQuery: ActiveQuery?
   private var drainingResponseChannels: Set<UInt64> = []
+  private var observedChannels: Set<UInt64> = []
+  private var nextAuxiliaryChannel: UInt64? = .max
   private var hasWrittenReport = false
 
   public init(
@@ -89,12 +92,6 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
         + environmentKeys.filter {
           !Self.fixedPlanRoleKeys.contains($0)
         }
-      scalarEvaluationKeys = evaluationKeys.filter {
-        !Self.stringListEnvironmentMacroNames.contains($0)
-      }
-      stringListEvaluationKeys = evaluationKeys.filter {
-        Self.stringListEnvironmentMacroNames.contains($0)
-      }
       isEnabled = true
     } catch {
       try reportWriter.write(
@@ -118,6 +115,7 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
   ) -> Bool {
     condition.lock()
     defer { condition.unlock() }
+    observedChannels.insert(channel)
     switch direction {
     case .clientToService:
       return isEnabled && !hasAttemptedCreateBuild && messageName == CreateBuildRequest.name
@@ -206,6 +204,8 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
       return
     }
 
+    reserveChannels([frame.channel, request.responseChannel])
+
     let configuredTargets = request.request.configuredTargets
     guard !configuredTargets.isEmpty else {
       writeReport(
@@ -217,74 +217,43 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
       return
     }
 
-    let scalarExpressions = scalarEvaluationKeys.map { "$(\($0))" }
     var rawValuesByTarget: [[String]] = []
     var targetReports: [EvaluatedSettingsProbeTargetReport] = []
     var failures: [EvaluatedSettingsProbeFailureCode] = []
 
     for (targetIndex, configuredTarget) in configuredTargets.enumerated() {
+      guard let auxiliaryChannel = allocateAuxiliaryChannel() else {
+        appendUnique(.auxiliaryChannelUnavailable, to: &failures)
+        break
+      }
       let parameters = configuredTarget.parameters ?? request.request.parameters
-      var valuesByKey: [String: String] = [:]
-      let scalarRequestPayload = SwiftBuildProtocolCodec.encodeMacroEvaluationRequest(
+      let requestPayload = SwiftBuildProtocolCodec.encodeAllExportedMacrosAndValuesRequest(
         sessionHandle: request.sessionHandle,
         targetGUID: configuredTarget.guid,
-        buildParameters: parameters,
-        expressions: scalarExpressions
+        buildParameters: parameters
       )
       switch performQuery(
-        payload: scalarRequestPayload,
-        channel: frame.channel,
-        targetIndex: targetIndex,
-        expectedValueCount: scalarEvaluationKeys.count,
+        payload: requestPayload,
+        channel: auxiliaryChannel,
         send: send
       ) {
-      case .values(let scalarValues):
-        valuesByKey.merge(
-          zip(scalarEvaluationKeys, scalarValues),
-          uniquingKeysWith: { _, latest in latest }
+      case .values(let values):
+        rawValuesByTarget.append(values)
+        targetReports.append(
+          EvaluatedSettingsProbeTargetReport(
+            targetIndex: targetIndex,
+            settings: zip(evaluationKeys, values).map {
+              EvaluatedSettingsProbeValueMetadata(key: $0.0, value: $0.1)
+            }
+          )
         )
+        if requiredPlanRoleIsMissing(in: values) {
+          appendUnique(.missingRequiredPlanRole, to: &failures)
+        }
       case .failure(let failure):
         appendUnique(failure, to: &failures)
       }
       if !failures.isEmpty { break }
-
-      for macroName in stringListEvaluationKeys {
-        let listRequestPayload = SwiftBuildProtocolCodec.encodeStringListMacroEvaluationRequest(
-          sessionHandle: request.sessionHandle,
-          targetGUID: configuredTarget.guid,
-          buildParameters: parameters,
-          macroName: macroName
-        )
-        switch performQuery(
-          payload: listRequestPayload,
-          channel: frame.channel,
-          targetIndex: targetIndex,
-          expectedValueCount: nil,
-          send: send
-        ) {
-        case .values(let listValues):
-          valuesByKey[macroName] = Self.canonicalizeStringListMacroValue(listValues)
-        case .failure(let failure):
-          appendUnique(failure, to: &failures)
-        }
-        if !failures.isEmpty { break }
-      }
-      if !failures.isEmpty { break }
-
-      let values = evaluationKeys.compactMap { valuesByKey[$0] }
-      guard values.count == evaluationKeys.count else {
-        appendUnique(.responseDecodeFailed, to: &failures)
-        break
-      }
-      rawValuesByTarget.append(values)
-      targetReports.append(
-        EvaluatedSettingsProbeTargetReport(
-          targetIndex: targetIndex,
-          settings: zip(evaluationKeys, values).map {
-            EvaluatedSettingsProbeValueMetadata(key: $0.0, value: $0.1)
-          }
-        )
-      )
     }
 
     if failures.isEmpty {
@@ -305,22 +274,15 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
   }
 
   private func handleServiceFrame(_ frame: BuildServiceRawFrame) -> Bool {
-    if frame.messageName == MacroEvaluationResponse.name {
+    if frame.messageName == AllExportedMacrosAndValuesResponse.name {
       let outcome: QueryOutcome
       do {
-        let values = try SwiftBuildProtocolCodec.decodeMacroEvaluationResponse(frame.payload)
-        condition.lock()
-        let expectedCount =
-          activeQuery?.channel == frame.channel
-          ? activeQuery?.expectedValueCount : nil
-        condition.unlock()
-        if let expectedCount, values.count != expectedCount {
-          outcome = .failure(.responseCountMismatch)
-        } else {
-          outcome = .values(values)
-        }
-      } catch SwiftBuildProtocolCodecError.unexpectedMacroEvaluationResult {
-        outcome = .failure(.responseShapeMismatch)
+        outcome = .values(
+          try SwiftBuildProtocolCodec.decodeAllExportedMacrosAndValuesResponse(
+            frame.payload,
+            selecting: evaluationKeys
+          )
+        )
       } catch {
         outcome = .failure(.responseDecodeFailed)
       }
@@ -355,16 +317,10 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
   private func performQuery(
     payload: [UInt8],
     channel: UInt64,
-    targetIndex: Int,
-    expectedValueCount: Int?,
     send: (BuildServiceRawFrame) throws -> Void
   ) -> QueryOutcome {
     condition.lock()
-    activeQuery = ActiveQuery(
-      channel: channel,
-      targetIndex: targetIndex,
-      expectedValueCount: expectedValueCount
-    )
+    activeQuery = ActiveQuery(channel: channel)
     condition.unlock()
 
     do {
@@ -414,6 +370,25 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
     condition.unlock()
   }
 
+  private func reserveChannels(_ channels: [UInt64]) {
+    condition.lock()
+    observedChannels.formUnion(channels)
+    condition.unlock()
+  }
+
+  private func allocateAuxiliaryChannel() -> UInt64? {
+    condition.lock()
+    defer { condition.unlock() }
+    while let candidate = nextAuxiliaryChannel {
+      nextAuxiliaryChannel =
+        candidate == Self.auxiliaryChannelLowerBound ? nil : candidate - 1
+      guard !observedChannels.contains(candidate) else { continue }
+      observedChannels.insert(candidate)
+      return candidate
+    }
+    return nil
+  }
+
   private func sharedValuesDisagree(_ valuesByTarget: [[String]]) -> Bool {
     guard let first = valuesByTarget.first, valuesByTarget.count > 1 else { return false }
     for keyIndex in evaluationKeys.indices
@@ -423,6 +398,12 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
       }
     }
     return false
+  }
+
+  private func requiredPlanRoleIsMissing(in values: [String]) -> Bool {
+    zip(evaluationKeys, values).contains {
+      Self.requiredPlanRoleKeys.contains($0.0) && $0.1.isEmpty
+    }
   }
 
   private func previewStateDisagrees(
@@ -556,12 +537,6 @@ public final class EvaluatedSettingsProbe: BuildServiceFrameInterceptor {
     return value.utf8.dropFirst().allSatisfy {
       isASCIILetter($0) || $0 == 95 || ($0 >= 48 && $0 <= 57)
     }
-  }
-
-  private static func canonicalizeStringListMacroValue(_ values: [String]) -> String {
-    // Swift Build's shell environment export uses this representation for
-    // StringListMacroDeclaration values, including TOOLCHAINS.
-    values.joined(separator: " ")
   }
 
   private static func isASCIILetter(_ byte: UInt8) -> Bool {

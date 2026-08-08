@@ -8,7 +8,6 @@ public enum SwiftBuildProtocolCompatibility {
 
 enum SwiftBuildProtocolCodecError: Error, Equatable {
   case unexpectedMessage(expected: String, actual: String)
-  case unexpectedMacroEvaluationResult
 }
 
 enum SwiftBuildProtocolCodec {
@@ -23,52 +22,33 @@ enum SwiftBuildProtocolCodec {
     return request
   }
 
-  static func encodeMacroEvaluationRequest(
+  static func encodeAllExportedMacrosAndValuesRequest(
     sessionHandle: String,
     targetGUID: String,
-    buildParameters: BuildParametersMessagePayload,
-    expressions: [String]
+    buildParameters: BuildParametersMessagePayload
   ) -> [UInt8] {
     encode(
-      MacroEvaluationRequest(
+      AllExportedMacrosAndValuesRequest(
         sessionHandle: sessionHandle,
-        context: .components(level: .target(targetGUID), buildParameters: buildParameters),
-        request: .stringExpressionArray(expressions),
-        overrides: nil,
-        resultType: .stringList
+        context: .components(level: .target(targetGUID), buildParameters: buildParameters)
       )
     )
   }
 
-  static func encodeStringListMacroEvaluationRequest(
-    sessionHandle: String,
-    targetGUID: String,
-    buildParameters: BuildParametersMessagePayload,
-    macroName: String
-  ) -> [UInt8] {
-    encode(
-      MacroEvaluationRequest(
-        sessionHandle: sessionHandle,
-        context: .components(level: .target(targetGUID), buildParameters: buildParameters),
-        request: .macro(macroName),
-        overrides: nil,
-        resultType: .stringList
-      )
-    )
-  }
-
-  static func decodeMacroEvaluationResponse(_ payload: [UInt8]) throws -> [String] {
+  static func decodeAllExportedMacrosAndValuesResponse(
+    _ payload: [UInt8],
+    selecting keys: [String]
+  ) throws -> [String] {
     let message = try decodeIPCMessage(payload)
-    guard let response = message.message as? MacroEvaluationResponse else {
+    guard let response = message.message as? AllExportedMacrosAndValuesResponse else {
       throw SwiftBuildProtocolCodecError.unexpectedMessage(
-        expected: MacroEvaluationResponse.name,
+        expected: AllExportedMacrosAndValuesResponse.name,
         actual: type(of: message.message).name
       )
     }
-    guard case .stringList(let values) = response.result else {
-      throw SwiftBuildProtocolCodecError.unexpectedMacroEvaluationResult
-    }
-    return values
+    // Project immediately onto the allowlist so the complete shell environment
+    // cannot escape the protocol query boundary.
+    return keys.map { response.result[$0] ?? "" }
   }
 
   static func encode(_ message: any Message) -> [UInt8] {
