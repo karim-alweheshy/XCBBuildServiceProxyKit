@@ -165,7 +165,21 @@ public struct BazelOperationExecutor: Sendable {
 
     let grace = cancellationGrace
     return await withTaskCancellationHandler {
-      async let completionTask = process.wait()
+      let completionSignal = AdapterCompletionSignal()
+      let completionTask = Task {
+        let completion = await process.wait()
+        await completionSignal.markComplete()
+        return completion
+      }
+      let bepTask = Task {
+        await Self.followBEP(
+          fileAt: invocation.bepURL,
+          process: process,
+          completionSignal: completionSignal,
+          cancellationGrace: grace,
+          onEvent: onEvent
+        )
+      }
       var presentationError: (any Error)?
       do {
         for await event in process.events {
@@ -179,7 +193,8 @@ public struct BazelOperationExecutor: Sendable {
       if Task.isCancelled {
         _ = await process.cancel(gracePeriod: grace)
       }
-      let completion = await completionTask
+      let completion = await completionTask.value
+      let bepOutcome = await bepTask.value
 
       if Task.isCancelled {
         return BazelOperationExecutionResult(
@@ -192,6 +207,16 @@ public struct BazelOperationExecutor: Sendable {
         return failed(
           .presentation,
           presentationError,
+          operationDirectoryURL: invocation.operationDirectoryURL,
+          processCompletion: completion
+        )
+      }
+      if completion.cancellationRequested,
+        case .failure(let phase, let message) = bepOutcome
+      {
+        return failed(
+          phase,
+          BEPEventPresentationError(message: message),
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion
         )
@@ -209,12 +234,13 @@ public struct BazelOperationExecutor: Sendable {
       }
 
       let bep: BEPValidation
-      do {
-        bep = try BEPStreamValidator.validate(fileAt: invocation.bepURL)
-      } catch {
+      switch bepOutcome {
+      case .success(let validation):
+        bep = validation
+      case .failure(let phase, let message):
         return failed(
-          .bepValidation,
-          error,
+          phase,
+          BEPEventPresentationError(message: message),
           operationDirectoryURL: invocation.operationDirectoryURL,
           processCompletion: completion
         )
@@ -319,7 +345,7 @@ public struct BazelOperationExecutor: Sendable {
           case .reportedExecutedActionCount where configuredActionGraph != nil:
             break
           default:
-            try await onEvent(.bep(event))
+            break
           }
         }
         if bep.result.succeeded, let configuredActionGraph {
@@ -458,6 +484,37 @@ public struct BazelOperationExecutor: Sendable {
     }
   }
 
+  private static func followBEP(
+    fileAt url: URL,
+    process: any OwnedProcess,
+    completionSignal: AdapterCompletionSignal,
+    cancellationGrace: TimeInterval,
+    onEvent: @escaping EventHandler
+  ) async -> StreamingBEPOutcome {
+    do {
+      let validation = try await BEPStreamFollower().follow(
+        fileAt: url,
+        processIsComplete: {
+          await completionSignal.isComplete
+        },
+        onEvent: { event in
+          do {
+            try await onEvent(.bep(event))
+          } catch {
+            throw BEPEventPresentationError(message: error.localizedDescription)
+          }
+        }
+      )
+      return .success(validation)
+    } catch let error as BEPEventPresentationError {
+      _ = await process.cancel(gracePeriod: cancellationGrace)
+      return .failure(.presentation, error.localizedDescription)
+    } catch {
+      _ = await process.cancel(gracePeriod: cancellationGrace)
+      return .failure(.bepValidation, error.localizedDescription)
+    }
+  }
+
   private func executeClean(
     plan: ResolvedBuildPlan,
     cancellationGate: ProductMutationCancellationGate
@@ -521,3 +578,22 @@ public struct BazelOperationExecutor: Sendable {
 }
 
 extension BazelOperationExecutor: BazelOperationExecuting {}
+
+private actor AdapterCompletionSignal {
+  private(set) var isComplete = false
+
+  func markComplete() {
+    isComplete = true
+  }
+}
+
+private struct BEPEventPresentationError: LocalizedError, Sendable {
+  let message: String
+
+  var errorDescription: String? { message }
+}
+
+private enum StreamingBEPOutcome: Sendable {
+  case failure(BazelOperationFailurePhase, String)
+  case success(BEPValidation)
+}

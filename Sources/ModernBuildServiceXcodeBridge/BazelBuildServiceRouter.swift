@@ -152,6 +152,7 @@ private struct NativeActiveBuild {
 }
 
 private struct OwnedOperationPresentation: Sendable {
+  var actionIdentities = Set<String>()
   let targetIDsByGUID: [String: Int]
   let wrapperTaskID: Int
   let wrapperTaskSignature: String
@@ -1349,7 +1350,9 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       presentedAction = nil
     }
     var actionTaskID: Int?
-    if presentedAction != nil {
+    if let presentedAction,
+      operation.presentation.actionIdentities.insert(presentedAction.identity).inserted
+    {
       actionTaskID = operation.presentation.nextTaskID
       operation.presentation.nextTaskID += 1
     }

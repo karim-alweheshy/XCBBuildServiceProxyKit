@@ -4,6 +4,42 @@ import XCTest
 @testable import BazelProxyCore
 
 final class FakeAdapterIntegrationTests: XCTestCase {
+  func testExecutorStreamsBEPActionBeforeAdapterExit() async throws {
+    let fixture = try ManifestFixture()
+    let source = fixture.workspaceURL.appendingPathComponent(
+      "bazel-out/products/App.app",
+      isDirectory: true
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let paused = fixture.workspaceURL.appendingPathComponent("adapter-paused")
+    let release = fixture.workspaceURL.appendingPathComponent("release-adapter")
+    let plan = try planWithProduct(fixture: fixture, source: source, destination: destination)
+    try setAdapterScript(streamingSuccessScript(), fixture: fixture)
+    let collector = ExecutionEventCollector()
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      )
+    )
+    let task = Task {
+      await executor.execute(plan: plan, processEnvironment: [:]) { event in
+        await collector.append(event)
+      }
+    }
+
+    let adapterReachedBarrier = await waitForFile(paused)
+    XCTAssertTrue(adapterReachedBarrier, "adapter did not reach its pre-exit barrier")
+    let actionArrivedBeforeExit = await waitForBEPAction(in: collector)
+    try Data().write(to: release)
+    let result = await task.value
+
+    XCTAssertTrue(actionArrivedBeforeExit, "BEP action was buffered until adapter exit")
+    XCTAssertEqual(result.status, .succeeded, String(describing: result.failure))
+  }
+
   func testExecutorReconcilesExecutedAndUpToDateConfiguredActions() async throws {
     let fixture = try ManifestFixture()
     let source = fixture.workspaceURL.appendingPathComponent(
@@ -87,7 +123,10 @@ final class FakeAdapterIntegrationTests: XCTestCase {
         )
       )
     )
-    XCTAssertFalse(events.contains(.bep(.reportedExecutedActionCount(1))))
+    XCTAssertEqual(
+      events.filter { $0 == .bep(.reportedExecutedActionCount(1)) }.count,
+      1
+    )
   }
 
   func testExecutorComposesOutputBEPReceiptAndMaterialization() async throws {
@@ -539,6 +578,29 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     """
   }
 
+  private func streamingSuccessScript() -> String {
+    """
+    #!/bin/sh
+    set -eu
+    /bin/mkdir -p "$PWD/bazel-out/products/App.app"
+    printf 'fake-product' > "$PWD/bazel-out/products/App.app/artifact"
+    printf '%s\n' \
+      '{"id":{"actionCompleted":{"configuration":"sim-arm64","label":"//app:App","primaryOutput":"bazel-out/products/App.app"}},"action":{"success":true,"type":"BundleTreeApp","commandLine":["assemble-app"]}}' \
+      > "$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
+    : > "$PWD/adapter-paused"
+    while [[ ! -f "$PWD/release-adapter" ]]; do /bin/sleep 0.01; done
+    printf '%s\n' \
+      '{"id":{"targetCompleted":{"label":"//app:App"}},"completed":{"success":true}}' \
+      '{"buildMetrics":{"actionSummary":{"actionsExecuted":"1"}}}' \
+      '{"finished":{"overallSuccess":true}}' \
+      >> "$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
+    /bin/cat > "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT" <<EOF
+    {"bazelrcs":[],"command":"build","commandOptions":["--config=_rules_xcodeproj_build"],"environmentKeys":[],"labels":["//app:App"],"materialization":{"contract":"manifest-v2"},"modes":{"action":"build","config":"_rules_xcodeproj_build","coverage":"NO","previews":"NO"},"outputGroups":["bp app-app","index_import","target_ids_list"],"provenance":{"bepPath":"$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"},"schemaVersion":1,"startupOptions":[],"targetIDs":["app-app"],"targets":["//app:AppProject"],"workingDirectory":"$PWD"}
+    EOF
+    /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
+    """
+  }
+
   private func actionGraphSuccessScript() -> String {
     """
     #!/bin/sh
@@ -635,6 +697,22 @@ final class FakeAdapterIntegrationTests: XCTestCase {
   ) -> String {
     String(decoding: events.filter { $0.channel == channel }.flatMap { $0.bytes }, as: UTF8.self)
   }
+
+  private func waitForFile(_ url: URL) async -> Bool {
+    for _ in 0..<200 {
+      if FileManager.default.fileExists(atPath: url.path) { return true }
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    return false
+  }
+
+  private func waitForBEPAction(in collector: ExecutionEventCollector) async -> Bool {
+    for _ in 0..<50 {
+      if await collector.containsBEPAction() { return true }
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    return false
+  }
 }
 
 private actor ExecutionEventCollector {
@@ -646,6 +724,13 @@ private actor ExecutionEventCollector {
 
   func snapshot() -> [BazelOperationExecutionEvent] {
     events
+  }
+
+  func containsBEPAction() -> Bool {
+    events.contains { event in
+      guard case .bep(.actionCompleted) = event else { return false }
+      return true
+    }
   }
 }
 
