@@ -55,6 +55,7 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     let collector = ExecutionEventCollector()
     let executor = BazelOperationExecutor(
       invocationPreparer: AdapterInvocationFactory(
+        collectConfiguredActions: true,
         operationRootURL: fixture.rootURL.appendingPathComponent("operations")
       )
     )

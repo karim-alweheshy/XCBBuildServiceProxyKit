@@ -64,14 +64,17 @@ public struct AdapterInvocationFactory: Sendable {
     "USER", "http_proxy", "https_proxy", "no_proxy",
   ]
 
+  public let collectConfiguredActions: Bool
   public let operationRootURL: URL
 
   public init(
+    collectConfiguredActions: Bool = false,
     operationRootURL: URL = FileManager.default.temporaryDirectory.appendingPathComponent(
       "xcode-bazel-proxy",
       isDirectory: true
     )
   ) {
+    self.collectConfiguredActions = collectConfiguredActions
     self.operationRootURL = operationRootURL
   }
 
@@ -126,7 +129,9 @@ public struct AdapterInvocationFactory: Sendable {
       let executionLogURL = operationURL.appendingPathComponent("execution-log")
       let receiptURL = operationURL.appendingPathComponent("invocation-receipt.json")
       var finalEnvironment = environment
-      finalEnvironment[Self.actionGraphEnvironmentKey] = actionGraphURL.path
+      if collectConfiguredActions {
+        finalEnvironment[Self.actionGraphEnvironmentKey] = actionGraphURL.path
+      }
       finalEnvironment[Self.requestDirectoryEnvironmentKey] = requestURL.path
       finalEnvironment[Self.bepEnvironmentKey] = bepURL.path
       finalEnvironment[Self.executionLogEnvironmentKey] = executionLogURL.path
