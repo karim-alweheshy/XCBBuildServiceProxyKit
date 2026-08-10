@@ -196,6 +196,14 @@ enum SwiftBuildOperationPresenter {
   }
 
   static func encodeConsoleOutput(
+    data: [UInt8]
+  ) -> [UInt8] {
+    SwiftBuildProtocolCodec.encode(
+      BuildOperationConsoleOutputEmitted(data: data)
+    )
+  }
+
+  static func encodeConsoleOutput(
     data: [UInt8],
     taskID: Int,
     stableSignature: String
