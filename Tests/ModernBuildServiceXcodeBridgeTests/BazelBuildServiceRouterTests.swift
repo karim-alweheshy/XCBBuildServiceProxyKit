@@ -96,7 +96,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(actionStarted.info.taskName, "Compile Swift module App")
     XCTAssertEqual(
       actionStarted.info.executionDescription,
-      "Compile Swift module App — Completed (cache status unavailable)"
+      "Compile Swift module App — Completed (cache outcome not reported)"
     )
     XCTAssertEqual(actionStarted.info.ruleInfo, "SwiftCompile //app:App App.app")
     XCTAssertEqual(
@@ -126,7 +126,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
       .map(\.statusMessage)
     XCTAssertTrue(
       progressMessages.contains(
-        "Bazel presented 2 actions: 0 executed, 0 cache hits, 1 completed (cache status unavailable), 1 up-to-date"
+        "Bazel presented 2 actions: 0 executed, 0 cache hits, 1 completed (cache outcome not reported), 1 up-to-date"
       )
     )
     let ended = try SwiftBuildProtocolCodec.decodeBuildOperationEnded(
