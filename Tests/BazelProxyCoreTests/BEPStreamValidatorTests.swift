@@ -6,7 +6,7 @@ import XCTest
 final class BEPStreamValidatorTests: XCTestCase {
   func testIncrementallyParsesAllowlistedEventsAndTerminalResult() throws {
     let lines = [
-      #"{"progress":{"stderr":"[2 / 7] Compiling App.swift\n"}}"#,
+      #"{"progress":{"stderr":"\u001b[32m[1,217 / 1,504]\u001b[0m [Prepa] Compiling App.swift\n"}}"#,
       #"{"id":{"actionCompleted":{"configuration":"sim-arm64","label":"//app:App","primaryOutput":"bazel-out/App.app"}},"action":{"success":true,"type":"SwiftCompile"}}"#,
       #"{"id":{"targetCompleted":{"label":"//app:App"}},"completed":{"success":true}}"#,
       #"{"buildMetrics":{"actionSummary":{"actionsExecuted":"7"}}}"#,
@@ -23,7 +23,12 @@ final class BEPStreamValidatorTests: XCTestCase {
     XCTAssertTrue(
       events.contains(
         .progress(
-          ProxyProgress(completed: 2, source: .interactiveHint, total: 7)
+          ProxyProgress(
+            activity: "[Prepa] Compiling App.swift",
+            completed: 1_217,
+            source: .interactiveHint,
+            total: 1_504
+          )
         )
       )
     )

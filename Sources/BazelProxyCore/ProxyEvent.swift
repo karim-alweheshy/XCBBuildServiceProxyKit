@@ -37,11 +37,20 @@ public struct ProxyProgress: Equatable, Sendable {
     case reportedExecutedActions
   }
 
+  /// Bazel's sanitized, human-readable description of the work it currently reports.
+  /// This remains a presentation hint and is never used to decide action success or cache state.
+  public let activity: String?
   public let completed: Int
   public let source: Source
   public let total: Int?
 
-  public init(completed: Int, source: Source, total: Int?) {
+  public init(
+    activity: String? = nil,
+    completed: Int,
+    source: Source,
+    total: Int?
+  ) {
+    self.activity = activity
     self.completed = completed
     self.source = source
     self.total = total
