@@ -561,6 +561,24 @@ public struct BazelOperationExecutor: Sendable {
   }
 
   private static func processFailureMessage(_ completion: ProcessCompletion) -> String {
+    let outputFailure: String?
+    switch completion.outputDisposition {
+    case .complete:
+      outputFailure = nil
+    case .bufferLimitExceeded(let channel):
+      outputFailure = "The \(channel.rawValue) event buffer limit was exceeded."
+    case .byteLimitExceeded(let channel):
+      outputFailure = "The \(channel.rawValue) output byte limit was exceeded."
+    case .consumerStopped(let channel):
+      outputFailure = "The \(channel.rawValue) output consumer stopped."
+    case .drainTimedOut:
+      outputFailure = "The adapter output drain timed out."
+    case .readFailed(let channel, let errno):
+      outputFailure = "Reading \(channel.rawValue) failed with errno \(errno)."
+    }
+    if let outputFailure {
+      return outputFailure
+    }
     switch completion.termination {
     case .exited(let status):
       return "The Bazel adapter exited with status \(status)."

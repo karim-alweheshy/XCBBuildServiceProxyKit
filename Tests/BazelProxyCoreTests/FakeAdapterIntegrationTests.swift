@@ -527,6 +527,37 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     }
   }
 
+  func testExecutorReportsOutputLimitInsteadOfTerminalSignal() async throws {
+    let fixture = try ManifestFixture()
+    try setAdapterScript("#!/bin/sh\nexec /usr/bin/yes x\n", fixture: fixture)
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      ),
+      processSupervisor: OwnedProcessSupervisor(
+        limits: ProcessOutputLimits(
+          maximumBufferedEvents: 8,
+          maximumBytesPerChannel: 128,
+          maximumChunkBytes: 32,
+          outputDrainGrace: 1,
+          violationKillGrace: 0.05
+        )
+      )
+    )
+
+    let result = await executor.execute(
+      plan: try fixture.plan(operationID: "output-limit"),
+      processEnvironment: [:]
+    )
+
+    XCTAssertEqual(result.status, .failed)
+    XCTAssertEqual(result.failure?.phase, .processExecution)
+    XCTAssertEqual(
+      result.failure?.message,
+      "The standardOutput output byte limit was exceeded."
+    )
+  }
+
   func testFakeAdapterMalformedReceiptFailsStrictValidation() async throws {
     let fixture = try ManifestFixture()
     try setAdapterScript(
