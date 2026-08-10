@@ -82,6 +82,9 @@ final class BazelActionDetailsTests: XCTestCase {
       fileAt: URL(fileURLWithPath: path)
     )
     XCTAssertGreaterThan(validation.fileBytes, 0)
+    if !validation.records.isEmpty {
+      XCTAssertEqual(validation.records.compactMap(\.timing).count, validation.records.count)
+    }
   }
 
   func testExecutionLogRejectsMalformedOversizedSymlinkAndAmbiguousData() throws {

@@ -66,6 +66,7 @@ public struct BazelPresentedAction: Equatable, Sendable {
   public let label: String
   public let mnemonic: String?
   public let primaryOutput: String
+  public let timing: BazelExecutionTiming?
 
   public init(
     completed action: BEPActionCompleted,
@@ -93,6 +94,7 @@ public struct BazelPresentedAction: Equatable, Sendable {
     self.label = action.label
     self.mnemonic = configured?.mnemonic ?? action.mnemonic ?? executionRecord?.mnemonic
     self.primaryOutput = action.primaryOutput
+    self.timing = executionRecord?.timing ?? action.timing
   }
 
   public init(upToDate action: BazelConfiguredAction) {
@@ -103,6 +105,7 @@ public struct BazelPresentedAction: Equatable, Sendable {
     self.label = action.label
     self.mnemonic = action.mnemonic
     self.primaryOutput = action.primaryOutput
+    self.timing = nil
   }
 
   public init(configured action: BazelConfiguredAction, executionRecord: BazelExecutionRecord) {
@@ -121,6 +124,7 @@ public struct BazelPresentedAction: Equatable, Sendable {
     self.label = action.label
     self.mnemonic = action.mnemonic
     self.primaryOutput = action.primaryOutput
+    self.timing = executionRecord.timing
   }
 
   public var taskTitle: String {

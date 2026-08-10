@@ -9,6 +9,7 @@ public struct BEPActionCompleted: Equatable, Sendable {
   public let mnemonic: String?
   public let primaryOutput: String
   public let succeeded: Bool?
+  public let timing: BazelExecutionTiming?
 
   public init(
     commandLineDisplayString: String? = nil,
@@ -17,7 +18,8 @@ public struct BEPActionCompleted: Equatable, Sendable {
     label: String,
     mnemonic: String?,
     primaryOutput: String,
-    succeeded: Bool?
+    succeeded: Bool?,
+    timing: BazelExecutionTiming? = nil
   ) {
     self.commandLineDisplayString = commandLineDisplayString
     self.configuration = configuration
@@ -26,6 +28,7 @@ public struct BEPActionCompleted: Equatable, Sendable {
     self.mnemonic = mnemonic
     self.primaryOutput = primaryOutput
     self.succeeded = succeeded
+    self.timing = timing
   }
 }
 
@@ -330,6 +333,7 @@ public struct BEPStreamValidator: Sendable {
       } else {
         commandLineDisplayString = nil
       }
+      let timing = try Self.parseActionTiming(payload)
       events.append(
         .actionCompleted(
           BEPActionCompleted(
@@ -339,7 +343,8 @@ public struct BEPStreamValidator: Sendable {
             label: label,
             mnemonic: mnemonic,
             primaryOutput: primaryOutput,
-            succeeded: succeeded
+            succeeded: succeeded,
+            timing: timing
           )
         )
       )
@@ -365,6 +370,105 @@ public struct BEPStreamValidator: Sendable {
       events.append(.finished(succeeded: succeeded))
     }
     return events
+  }
+
+  private static func parseActionTiming(
+    _ payload: [String: Any]?
+  ) throws -> BazelExecutionTiming? {
+    let start = payload?["startTime"] as? String
+    let end = payload?["endTime"] as? String
+    guard start != nil || end != nil else { return nil }
+    guard let start,
+      let end,
+      let startMicroseconds = parseRFC3339Microseconds(start),
+      let endMicroseconds = parseRFC3339Microseconds(end),
+      endMicroseconds >= startMicroseconds
+    else { throw BEPStreamError.malformedJSONLine }
+    return BazelExecutionTiming(
+      startTimeUnixMicroseconds: startMicroseconds,
+      durationMicroseconds: endMicroseconds - startMicroseconds
+    )
+  }
+
+  /// Parses protobuf JSON's canonical UTC Timestamp spelling without floating-point rounding.
+  private static func parseRFC3339Microseconds(_ value: String) -> UInt64? {
+    let bytes = Array(value.utf8)
+    guard bytes.count >= 20,
+      bytes[4] == 0x2D,
+      bytes[7] == 0x2D,
+      bytes[10] == 0x54,
+      bytes[13] == 0x3A,
+      bytes[16] == 0x3A,
+      bytes.last == 0x5A
+    else { return nil }
+
+    func decimal(_ range: Range<Int>) -> Int? {
+      var result = 0
+      for index in range {
+        guard index < bytes.count, (0x30...0x39).contains(bytes[index]) else { return nil }
+        result = result * 10 + Int(bytes[index] - 0x30)
+      }
+      return result
+    }
+
+    guard let year = decimal(0..<4),
+      let month = decimal(5..<7),
+      let day = decimal(8..<10),
+      let hour = decimal(11..<13),
+      let minute = decimal(14..<16),
+      let second = decimal(17..<19),
+      (1...9999).contains(year),
+      (1...12).contains(month),
+      (0...23).contains(hour),
+      (0...59).contains(minute),
+      (0...59).contains(second)
+    else { return nil }
+
+    let leapYear =
+      year.isMultiple(of: 4)
+      && (!year.isMultiple(of: 100) || year.isMultiple(of: 400))
+    let daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    guard (1...daysInMonth[month - 1]).contains(day) else { return nil }
+
+    let fractionalMicroseconds: Int
+    if bytes[19] == 0x5A {
+      guard bytes.count == 20 else { return nil }
+      fractionalMicroseconds = 0
+    } else {
+      guard bytes[19] == 0x2E, (21...30).contains(bytes.count) else { return nil }
+      let fractionalDigits = bytes[20..<(bytes.count - 1)]
+      guard !fractionalDigits.isEmpty,
+        fractionalDigits.count <= 9,
+        fractionalDigits.allSatisfy({ (0x30...0x39).contains($0) })
+      else { return nil }
+      var microseconds = 0
+      for index in 0..<6 {
+        microseconds *= 10
+        if index < fractionalDigits.count {
+          microseconds += Int(
+            fractionalDigits[
+              fractionalDigits.index(
+                fractionalDigits.startIndex,
+                offsetBy: index
+              )] - 0x30)
+        }
+      }
+      fractionalMicroseconds = microseconds
+    }
+
+    var adjustedYear = year
+    adjustedYear -= month <= 2 ? 1 : 0
+    let era = adjustedYear / 400
+    let yearOfEra = adjustedYear - era * 400
+    let adjustedMonth = month + (month > 2 ? -3 : 9)
+    let dayOfYear = (153 * adjustedMonth + 2) / 5 + day - 1
+    let dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear
+    let daysSinceUnixEpoch = era * 146_097 + dayOfEra - 719_468
+    guard daysSinceUnixEpoch >= 0 else { return nil }
+    let secondsSinceUnixEpoch =
+      UInt64(daysSinceUnixEpoch) * 86_400
+      + UInt64(hour * 3_600 + minute * 60 + second)
+    return secondsSinceUnixEpoch * 1_000_000 + UInt64(fractionalMicroseconds)
   }
 
   private static func parseProgress(

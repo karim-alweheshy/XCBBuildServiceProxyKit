@@ -25,7 +25,13 @@ final class BazelCompactExecutionLogTests: XCTestCase {
           mnemonic: "SwiftCompile",
           exitCode: 0,
           status: "SUCCESS",
-          runner: "local sandbox"
+          runner: "local sandbox",
+          timing: SyntheticTiming(
+            startSeconds: 1_800_000_000,
+            startNanos: 123_456_000,
+            durationSeconds: 2,
+            durationNanos: 345_678_000
+          )
         ) + protobufVarintField(99, value: 123)
           + protobufFixed64Field(100, value: 456)
           + protobufBytesField(101, value: Data([1, 2, 3]))
@@ -61,6 +67,13 @@ final class BazelCompactExecutionLogTests: XCTestCase {
     XCTAssertEqual(validation.records[0].cacheKind, .other)
     XCTAssertEqual(validation.records[0].runner, "local sandbox")
     XCTAssertEqual(validation.records[0].listedOutputs, ["bazel-out/App.swiftmodule"])
+    XCTAssertEqual(
+      validation.records[0].timing,
+      BazelExecutionTiming(
+        startTimeUnixMicroseconds: 1_800_000_000_123_456,
+        durationMicroseconds: 2_345_678
+      )
+    )
     XCTAssertEqual(validation.records[1].cacheKind, .disk)
     XCTAssertEqual(
       validation.records[1].listedOutputs,
@@ -301,6 +314,7 @@ final class BazelCompactExecutionLogTests: XCTestCase {
     let validation = try BazelExecutionLogValidator.validate(fileAt: url)
     XCTAssertEqual(validation.fileBytes, 35_185)
     XCTAssertEqual(validation.records.count, 35)
+    XCTAssertEqual(validation.records.compactMap(\.timing).count, 35)
   }
 
   func testRealBazelNineInvocationOnlyCompactLogIsValid() throws {
@@ -362,11 +376,73 @@ final class BazelCompactExecutionLogTests: XCTestCase {
     XCTAssertEqual(validation.records[0].exitCode, -1)
     XCTAssertEqual(validation.records[0].status, "LOCAL_EXEC_ERROR")
   }
+
+  func testCompactLogRejectsMalformedSpawnTimingAndOmitsIncompleteTiming() throws {
+    let fixture = try TemporaryCompactExecutionLog()
+    defer { fixture.remove() }
+
+    for timing in [
+      SyntheticTiming(
+        startSeconds: 1_800_000_000,
+        durationSeconds: -1
+      ),
+      SyntheticTiming(
+        startSeconds: 1_800_000_000,
+        durationNanos: 1_000_000_000
+      ),
+      SyntheticTiming(
+        startSeconds: Int64.max,
+        durationSeconds: 1
+      ),
+    ] {
+      try fixture.write(entries: [
+        compactEntry(
+          payloadField: 7,
+          payload: spawn(outputs: [], label: "//app:App", timing: timing)
+        )
+      ])
+      assertCompactMalformed(tryValidation: { try fixture.validate() })
+    }
+
+    let durationOnly = protobufBytesField(
+      18,
+      value: protobufBytesField(
+        1,
+        value: secondsAndNanos(seconds: 1, nanos: 500_000_000)
+      )
+    )
+    try fixture.write(entries: [
+      compactEntry(
+        payloadField: 7,
+        payload: spawn(outputs: [], label: "//app:App") + durationOnly
+      )
+    ])
+    XCTAssertNil(try fixture.validate().records.first?.timing)
+  }
 }
 
 private enum SyntheticOutput {
   case identifier(UInt32)
   case invalidPath(String)
+}
+
+private struct SyntheticTiming {
+  let startSeconds: Int64
+  let startNanos: UInt64
+  let durationSeconds: Int64
+  let durationNanos: UInt64
+
+  init(
+    startSeconds: Int64,
+    startNanos: UInt64 = 0,
+    durationSeconds: Int64 = 0,
+    durationNanos: UInt64 = 0
+  ) {
+    self.startSeconds = startSeconds
+    self.startNanos = startNanos
+    self.durationSeconds = durationSeconds
+    self.durationNanos = durationNanos
+  }
 }
 
 private struct TemporaryCompactExecutionLog {
@@ -429,7 +505,8 @@ private func spawn(
   exitCode: Int32? = nil,
   status: String? = nil,
   runner: String? = nil,
-  cacheHit: Bool = false
+  cacheHit: Bool = false,
+  timing: SyntheticTiming? = nil
 ) -> Data {
   var result = Data()
   for argument in arguments { result.append(protobufStringField(1, value: argument)) }
@@ -451,7 +528,30 @@ private func spawn(
   if let status { result.append(protobufStringField(10, value: status)) }
   if let runner { result.append(protobufStringField(11, value: runner)) }
   if cacheHit { result.append(protobufVarintField(12, value: 1)) }
+  if let timing {
+    let metrics =
+      protobufBytesField(
+        1,
+        value: secondsAndNanos(
+          seconds: timing.durationSeconds,
+          nanos: timing.durationNanos
+        )
+      )
+      + protobufBytesField(
+        20,
+        value: secondsAndNanos(
+          seconds: timing.startSeconds,
+          nanos: timing.startNanos
+        )
+      )
+    result.append(protobufBytesField(18, value: metrics))
+  }
   return result
+}
+
+private func secondsAndNanos(seconds: Int64, nanos: UInt64) -> Data {
+  protobufVarintField(1, value: UInt64(bitPattern: seconds))
+    + protobufVarintField(2, value: nanos)
 }
 
 private func framed(_ message: Data) -> Data {

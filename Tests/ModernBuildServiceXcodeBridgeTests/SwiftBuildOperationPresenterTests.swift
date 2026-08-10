@@ -319,6 +319,36 @@ final class SwiftBuildOperationPresenterTests: XCTestCase {
     }
   }
 
+  func testPresenterConstructsTaskMetrics() throws {
+    let ended = try decode(
+      SwiftBuildOperationPresenter.encodeTaskEnded(
+        id: 1,
+        stableSignature: stableSignature,
+        status: .succeeded,
+        signalled: false,
+        metrics: SwiftBuildPresentedTaskMetrics(
+          userTimeMicroseconds: 10,
+          systemTimeMicroseconds: 20,
+          maximumResidentSetSizeBytes: 30,
+          wallClockStartTimeMicrosecondsSinceReferenceDate: 40,
+          wallClockDurationMicroseconds: 50
+        )
+      ),
+      as: BuildOperationTaskEnded.self
+    )
+
+    XCTAssertEqual(
+      ended.metrics,
+      BuildOperationTaskEnded.Metrics(
+        utime: 10,
+        stime: 20,
+        maxRSS: 30,
+        wcStartTime: 40,
+        wcDuration: 50
+      )
+    )
+  }
+
   func testPresenterConstructsTargetAndEveryOperationTerminalStatus() throws {
     XCTAssertEqual(
       try decode(

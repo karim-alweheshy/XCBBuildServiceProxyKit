@@ -194,6 +194,7 @@ enum BazelCompactExecutionLogDecoder {
     var runner: String?
     var status: String?
     var targetLabel = ""
+    var timing: BazelExecutionTiming?
 
     while !reader.isAtEnd {
       let field = try reader.readField()
@@ -235,6 +236,11 @@ enum BazelCompactExecutionLogDecoder {
       case 12:
         try field.require(.varint)
         cacheHit = try reader.readVarint() != 0
+      case 18:
+        try field.require(.lengthDelimited)
+        timing = try parseSpawnMetrics(
+          reader.readLengthDelimited(maximumBytes: limits.maximumLineBytes)
+        )
       default:
         try reader.skip(field.wireType)
       }
@@ -258,8 +264,69 @@ enum BazelCompactExecutionLogDecoder {
       mnemonic: mnemonic,
       runner: runner,
       status: status,
-      targetLabel: targetLabel
+      targetLabel: targetLabel,
+      timing: timing
     )
+  }
+
+  private static func parseSpawnMetrics(_ data: Data) throws -> BazelExecutionTiming? {
+    var reader = ProtoReader(data)
+    var durationMicroseconds: UInt64?
+    var startTimeUnixMicroseconds: UInt64?
+    while !reader.isAtEnd {
+      let field = try reader.readField()
+      switch field.number {
+      case 1:
+        try field.require(.lengthDelimited)
+        durationMicroseconds = try parseSecondsAndNanos(
+          reader.readLengthDelimited()
+        )
+      case 20:
+        try field.require(.lengthDelimited)
+        startTimeUnixMicroseconds = try parseSecondsAndNanos(
+          reader.readLengthDelimited()
+        )
+      default:
+        try reader.skip(field.wireType)
+      }
+    }
+    guard let durationMicroseconds, let startTimeUnixMicroseconds else { return nil }
+    return BazelExecutionTiming(
+      startTimeUnixMicroseconds: startTimeUnixMicroseconds,
+      durationMicroseconds: durationMicroseconds
+    )
+  }
+
+  private static func parseSecondsAndNanos(_ data: Data) throws -> UInt64 {
+    var reader = ProtoReader(data)
+    var seconds: Int64 = 0
+    var nanos: UInt64 = 0
+    while !reader.isAtEnd {
+      let field = try reader.readField()
+      switch field.number {
+      case 1:
+        try field.require(.varint)
+        seconds = Int64(bitPattern: try reader.readVarint())
+      case 2:
+        try field.require(.varint)
+        let value = try reader.readVarint()
+        guard value < 1_000_000_000 else {
+          throw BazelExecutionLogError.malformedCompactLog
+        }
+        nanos = value
+      default:
+        try reader.skip(field.wireType)
+      }
+    }
+    guard seconds >= 0 else { throw BazelExecutionLogError.malformedCompactLog }
+    let (wholeMicroseconds, secondsOverflow) = UInt64(seconds).multipliedReportingOverflow(
+      by: 1_000_000
+    )
+    let (microseconds, additionOverflow) = wholeMicroseconds.addingReportingOverflow(nanos / 1_000)
+    guard !secondsOverflow, !additionOverflow else {
+      throw BazelExecutionLogError.malformedCompactLog
+    }
+    return microseconds
   }
 
   private static func parseOutput(

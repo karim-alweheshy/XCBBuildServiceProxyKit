@@ -52,6 +52,14 @@ struct SwiftBuildPresentedTask: Equatable, Sendable {
   let taskName: String
 }
 
+struct SwiftBuildPresentedTaskMetrics: Equatable, Sendable {
+  let userTimeMicroseconds: UInt64
+  let systemTimeMicroseconds: UInt64
+  let maximumResidentSetSizeBytes: UInt64
+  let wallClockStartTimeMicrosecondsSinceReferenceDate: UInt64
+  let wallClockDurationMicroseconds: UInt64
+}
+
 enum SwiftBuildPresentedDiagnosticKind: CaseIterable, Equatable, Sendable {
   case error
   case note
@@ -241,7 +249,8 @@ enum SwiftBuildOperationPresenter {
     stableSignature: String,
     status: SwiftBuildPresentedTaskStatus,
     signalled: Bool,
-    parentID: Int? = nil
+    parentID: Int? = nil,
+    metrics: SwiftBuildPresentedTaskMetrics? = nil
   ) -> [UInt8] {
     SwiftBuildProtocolCodec.encode(
       BuildOperationTaskEnded(
@@ -249,7 +258,15 @@ enum SwiftBuildOperationPresenter {
         signature: taskSignature(stableSignature, parentID: parentID),
         status: status.protocolValue,
         signalled: signalled,
-        metrics: nil
+        metrics: metrics.map {
+          BuildOperationTaskEnded.Metrics(
+            utime: $0.userTimeMicroseconds,
+            stime: $0.systemTimeMicroseconds,
+            maxRSS: $0.maximumResidentSetSizeBytes,
+            wcStartTime: $0.wallClockStartTimeMicrosecondsSinceReferenceDate,
+            wcDuration: $0.wallClockDurationMicroseconds
+          )
+        }
       )
     )
   }

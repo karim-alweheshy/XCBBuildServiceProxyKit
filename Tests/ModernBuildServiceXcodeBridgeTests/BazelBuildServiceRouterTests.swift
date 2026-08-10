@@ -35,14 +35,41 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(remote.info.taskName, "Compile Swift module App")
     XCTAssertEqual(
       remote.info.executionDescription,
-      "Compile Swift module App — Remote cache hit"
+      "Compile Swift module App — Remote cache hit — Bazel-recorded action time 2.346 s"
     )
     XCTAssertEqual(remote.info.commandLineDisplayString, "actual-swiftc -c Input.swift")
 
     let worker = try XCTUnwrap(tasks.first { $0.id == 2 })
     XCTAssertEqual(worker.info.taskName, "Link App")
-    XCTAssertEqual(worker.info.executionDescription, "Link App — Executed with worker")
+    XCTAssertEqual(
+      worker.info.executionDescription,
+      "Link App — Executed with worker — Bazel-recorded action time 1.250 s"
+    )
     XCTAssertEqual(worker.info.commandLineDisplayString, "actual-clang -o App")
+
+    let ended = harness.xcodeFrames(on: 201)
+      .filter { $0.messageName == BuildOperationTaskEnded.name }
+      .compactMap { try? harness.decode($0, as: BuildOperationTaskEnded.self) }
+    XCTAssertEqual(
+      ended.first { $0.id == 1 }?.metrics,
+      BuildOperationTaskEnded.Metrics(
+        utime: 0,
+        stime: 0,
+        maxRSS: 0,
+        wcStartTime: 25_000_000,
+        wcDuration: 2_345_678
+      )
+    )
+    XCTAssertEqual(
+      ended.first { $0.id == 2 }?.metrics,
+      BuildOperationTaskEnded.Metrics(
+        utime: 0,
+        stime: 0,
+        maxRSS: 0,
+        wcStartTime: 30_000_000,
+        wcDuration: 1_250_000
+      )
+    )
   }
 
   func testMappedBuildOwnsCreateStartEventsAndTerminalExactlyOnce() throws {
@@ -96,7 +123,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(actionStarted.info.taskName, "Compile Swift module App")
     XCTAssertEqual(
       actionStarted.info.executionDescription,
-      "Compile Swift module App — Completed (cache outcome not reported)"
+      "Compile Swift module App — Completed (cache outcome not reported) — Bazel-recorded action time 2.346 s"
     )
     XCTAssertEqual(actionStarted.info.ruleInfo, "SwiftCompile //app:App App.app")
     XCTAssertEqual(
@@ -108,6 +135,16 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(
       actionEnded.signature,
       BuildOperationTaskSignature(rawValue: actionStarted.info.signature)
+    )
+    XCTAssertEqual(
+      actionEnded.metrics,
+      BuildOperationTaskEnded.Metrics(
+        utime: 0,
+        stime: 0,
+        maxRSS: 0,
+        wcStartTime: 25_000_000,
+        wcDuration: 2_345_678
+      )
     )
     let upToDateStarted = try XCTUnwrap(
       harness.xcodeFrames(on: 201)
@@ -1430,7 +1467,11 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
                 label: "//app:App",
                 mnemonic: "SwiftCompile",
                 primaryOutput: "App.app",
-                succeeded: true
+                succeeded: true,
+                timing: BazelExecutionTiming(
+                  startTimeUnixMicroseconds: 978_307_225_000_000,
+                  durationMicroseconds: 2_345_678
+                )
               )
             )
           )
@@ -1502,7 +1543,11 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
                 mnemonic: "SwiftCompile",
                 runner: "remote cache hit",
                 status: nil,
-                targetLabel: "//app:App"
+                targetLabel: "//app:App",
+                timing: BazelExecutionTiming(
+                  startTimeUnixMicroseconds: 978_307_225_000_000,
+                  durationMicroseconds: 2_345_678
+                )
               )
             )
           )
@@ -1525,7 +1570,11 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
                 mnemonic: "ObjcLink",
                 runner: "worker",
                 status: "SUCCESS",
-                targetLabel: "//app:App"
+                targetLabel: "//app:App",
+                timing: BazelExecutionTiming(
+                  startTimeUnixMicroseconds: 978_307_230_000_000,
+                  durationMicroseconds: 1_250_000
+                )
               )
             )
           )

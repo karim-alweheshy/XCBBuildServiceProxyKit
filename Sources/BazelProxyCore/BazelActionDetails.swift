@@ -149,6 +149,19 @@ public enum BazelCacheKind: Equatable, Sendable {
   case other
 }
 
+public struct BazelExecutionTiming: Equatable, Sendable {
+  /// Wall-clock start time in microseconds since the Unix epoch, as reported by Bazel.
+  public let startTimeUnixMicroseconds: UInt64
+
+  /// Total wall-clock time Bazel spent running the spawn, in microseconds.
+  public let durationMicroseconds: UInt64
+
+  public init(startTimeUnixMicroseconds: UInt64, durationMicroseconds: UInt64) {
+    self.startTimeUnixMicroseconds = startTimeUnixMicroseconds
+    self.durationMicroseconds = durationMicroseconds
+  }
+}
+
 public struct BazelExecutionRecord: Equatable, Sendable {
   public let cacheHit: Bool
   public let commandLineDisplayString: String?
@@ -158,6 +171,7 @@ public struct BazelExecutionRecord: Equatable, Sendable {
   public let runner: String?
   public let status: String?
   public let targetLabel: String
+  public let timing: BazelExecutionTiming?
 
   public init(
     cacheHit: Bool,
@@ -167,7 +181,8 @@ public struct BazelExecutionRecord: Equatable, Sendable {
     mnemonic: String?,
     runner: String?,
     status: String?,
-    targetLabel: String
+    targetLabel: String,
+    timing: BazelExecutionTiming? = nil
   ) {
     self.cacheHit = cacheHit
     self.commandLineDisplayString = commandLineDisplayString
@@ -177,6 +192,7 @@ public struct BazelExecutionRecord: Equatable, Sendable {
     self.runner = runner
     self.status = status
     self.targetLabel = targetLabel
+    self.timing = timing
   }
 
   var cacheKind: BazelCacheKind {
@@ -383,7 +399,8 @@ public enum BazelExecutionLogValidator {
         mnemonic: raw.mnemonic?.nilIfEmpty,
         runner: raw.runner?.nilIfEmpty,
         status: raw.status?.nilIfEmpty,
-        targetLabel: raw.targetLabel
+        targetLabel: raw.targetLabel,
+        timing: nil
       )
       records.append(record)
     }
@@ -493,6 +510,7 @@ public enum BazelExecutionLogValidator {
       && lhs.mnemonic == rhs.mnemonic
       && lhs.runner == rhs.runner
       && lhs.status == rhs.status
+      && lhs.timing == rhs.timing
       && BazelActionReconciliationKey(label: lhs.targetLabel, primaryOutput: "").label
         == BazelActionReconciliationKey(label: rhs.targetLabel, primaryOutput: "").label
   }
