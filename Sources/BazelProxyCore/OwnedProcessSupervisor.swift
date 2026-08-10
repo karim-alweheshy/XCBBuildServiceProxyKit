@@ -27,7 +27,7 @@ public struct ProcessOutputLimits: Equatable, Sendable {
 
   public init(
     maximumBufferedEvents: Int = 128,
-    maximumBytesPerChannel: Int = 16 * 1024 * 1024,
+    maximumBytesPerChannel: Int = 256 * 1024 * 1024,
     maximumChunkBytes: Int = 64 * 1024,
     outputDrainGrace: TimeInterval = 2,
     violationKillGrace: TimeInterval = 0.25

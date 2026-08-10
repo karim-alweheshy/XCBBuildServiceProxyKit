@@ -5,6 +5,13 @@ import XCTest
 @testable import BazelProxyCore
 
 final class OwnedProcessSupervisorTests: XCTestCase {
+  func testDefaultLimitsPermitProductionScaleBuildLogsWithBoundedBuffering() {
+    let limits = ProcessOutputLimits()
+
+    XCTAssertEqual(limits.maximumBufferedEvents, 128)
+    XCTAssertEqual(limits.maximumBytesPerChannel, 256 * 1024 * 1024)
+  }
+
   func testReportsSuccessfulAndFailedAdapterExitExactly() async throws {
     let successFixture = try ManifestFixture()
     try setAdapterScript(
