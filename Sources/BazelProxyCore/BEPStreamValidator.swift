@@ -92,7 +92,7 @@ public struct BEPStreamLimits: Equatable, Sendable {
 
   public init(
     maximumFileBytes: Int = 256 * 1024 * 1024,
-    maximumLineBytes: Int = 1024 * 1024
+    maximumLineBytes: Int = 4 * 1024 * 1024
   ) {
     self.maximumFileBytes = maximumFileBytes
     self.maximumLineBytes = maximumLineBytes
