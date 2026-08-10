@@ -111,6 +111,7 @@ public struct BuildProxyManifest: Codable, Equatable, Sendable {
     public let adapterPath: String
     public let bazelPath: String
     public let bazelrcPath: String
+    public let bazelEnvironmentKeys: [String]?
     public let environmentKeys: [String]
     public let generatorLabel: String
     public let receiptSchemaVersion: Int
@@ -315,16 +316,20 @@ public struct BuildProxyManifest: Codable, Equatable, Sendable {
       invocation.bazelrcPath,
       field: "invocation.bazelrcPath"
     )
-    guard invocation.environmentKeys.count == Set(invocation.environmentKeys).count else {
-      throw BuildProxyManifestError.invalidContract(
-        "invocation.environmentKeys contains duplicates")
-    }
-    for key in invocation.environmentKeys {
-      guard BuildProxySecurity.isEnvironmentKey(key) else {
-        throw BuildProxyManifestError.invalidContract("invalid environment key \(key)")
+    for (field, keys) in [
+      ("invocation.environmentKeys", invocation.environmentKeys),
+      ("invocation.bazelEnvironmentKeys", invocation.bazelEnvironmentKeys ?? []),
+    ] {
+      guard keys.count == Set(keys).count else {
+        throw BuildProxyManifestError.invalidContract("\(field) contains duplicates")
       }
-      if BuildProxySecurity.isSensitiveEnvironmentKey(key) {
-        throw BuildProxyManifestError.sensitiveEnvironmentKey(key)
+      for key in keys {
+        guard BuildProxySecurity.isEnvironmentKey(key) else {
+          throw BuildProxyManifestError.invalidContract("invalid environment key \(key)")
+        }
+        if BuildProxySecurity.isSensitiveEnvironmentKey(key) {
+          throw BuildProxyManifestError.sensitiveEnvironmentKey(key)
+        }
       }
     }
 
@@ -499,7 +504,8 @@ public struct BuildProxyManifest: Codable, Equatable, Sendable {
       required: [
         "adapterPath", "bazelPath", "bazelrcPath", "environmentKeys", "generatorLabel",
         "receiptSchemaVersion",
-      ]
+      ],
+      optional: ["bazelEnvironmentKeys"]
     )
     _ = try JSONShape.object(
       top["project"],

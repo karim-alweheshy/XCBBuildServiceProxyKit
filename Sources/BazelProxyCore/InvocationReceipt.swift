@@ -285,6 +285,7 @@ public enum InvocationReceiptValidator {
     // that were unset. Subset validation is therefore deliberate; widening beyond these three
     // explicit sources is not.
     let allowed = Set(plan.manifest.invocation.environmentKeys)
+      .union(plan.manifest.invocation.bazelEnvironmentKeys ?? [])
       .union(AdapterInvocationFactory.systemEnvironmentAllowlist)
       .union(generatedEnvironmentKeys)
     guard Set(values).isSubset(of: allowed) else {
