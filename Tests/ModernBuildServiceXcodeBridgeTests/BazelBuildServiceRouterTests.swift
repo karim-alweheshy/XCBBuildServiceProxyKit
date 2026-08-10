@@ -31,7 +31,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     let tasks = harness.xcodeFrames(on: 201)
       .filter { $0.messageName == BuildOperationTaskStarted.name }
       .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
-    let remote = try XCTUnwrap(tasks.first { $0.id == 2 })
+    let remote = try XCTUnwrap(tasks.first { $0.id == 1 })
     XCTAssertEqual(remote.info.taskName, "Compile Swift module App")
     XCTAssertEqual(
       remote.info.executionDescription,
@@ -39,7 +39,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     )
     XCTAssertEqual(remote.info.commandLineDisplayString, "actual-swiftc -c Input.swift")
 
-    let worker = try XCTUnwrap(tasks.first { $0.id == 3 })
+    let worker = try XCTUnwrap(tasks.first { $0.id == 2 })
     XCTAssertEqual(worker.info.taskName, "Link App")
     XCTAssertEqual(worker.info.executionDescription, "Link App — Executed with worker")
     XCTAssertEqual(worker.info.commandLineDisplayString, "actual-clang -o App")
@@ -76,21 +76,21 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationEnded.name }.count, 1)
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationTargetStarted.name }.count, 1)
     XCTAssertEqual(eventNames.filter { $0 == BuildOperationTargetEnded.name }.count, 1)
-    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskStarted.name }.count, 3)
-    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskEnded.name }.count, 3)
+    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskStarted.name }.count, 2)
+    XCTAssertEqual(eventNames.filter { $0 == BuildOperationTaskEnded.name }.count, 2)
     XCTAssertTrue(eventNames.contains(BuildOperationConsoleOutputEmitted.name))
     XCTAssertTrue(eventNames.contains(BuildOperationProgressUpdated.name))
     let actionStarted = try XCTUnwrap(
       harness.xcodeFrames(on: 201)
         .filter { $0.messageName == BuildOperationTaskStarted.name }
         .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
-        .first { $0.id == 2 }
+        .first { $0.id == 1 }
     )
     let actionEnded = try XCTUnwrap(
       harness.xcodeFrames(on: 201)
         .filter { $0.messageName == BuildOperationTaskEnded.name }
         .compactMap { try? harness.decode($0, as: BuildOperationTaskEnded.self) }
-        .first { $0.id == 2 }
+        .first { $0.id == 1 }
     )
     XCTAssertNil(actionStarted.parentID)
     XCTAssertEqual(actionStarted.info.taskName, "Compile Swift module App")
@@ -113,7 +113,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
       harness.xcodeFrames(on: 201)
         .filter { $0.messageName == BuildOperationTaskStarted.name }
         .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
-        .first { $0.id == 3 }
+        .first { $0.id == 2 }
     )
     XCTAssertEqual(upToDateStarted.info.taskName, "Archive App")
     XCTAssertEqual(
@@ -134,13 +134,19 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     )
     XCTAssertEqual(ended.id, -1)
     XCTAssertEqual(ended.status, .succeeded)
-    let wrapperEnded = try XCTUnwrap(
+    let taskNames = harness.xcodeFrames(on: 201)
+      .filter { $0.messageName == BuildOperationTaskStarted.name }
+      .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
+      .map(\.info.taskName)
+    XCTAssertFalse(taskNames.contains("Bazel"))
+    let console = try XCTUnwrap(
       harness.xcodeFrames(on: 201)
-        .filter { $0.messageName == BuildOperationTaskEnded.name }
-        .compactMap { try? harness.decode($0, as: BuildOperationTaskEnded.self) }
-        .first { $0.id == 1 }
+        .first { $0.messageName == BuildOperationConsoleOutputEmitted.name }
+        .map { try harness.decode($0, as: BuildOperationConsoleOutputEmitted.self) }
     )
-    XCTAssertFalse(wrapperEnded.signalled)
+    XCTAssertNil(console.taskID)
+    XCTAssertNil(console.taskSignature)
+    XCTAssertNil(console.targetID)
 
     XCTAssertTrue(
       try harness.sendClient(
@@ -653,29 +659,28 @@ final class BazelBuildServiceRouterTests: XCTestCase {
       .filter { $0.messageName == BuildOperationEnded.name }
       .map { try harness.decode($0, as: BuildOperationEnded.self) }
     XCTAssertEqual(terminals.map(\.status), [.cancelled])
-    let wrapperEnded = try XCTUnwrap(
-      harness.xcodeFrames(on: 1_011)
-        .filter { $0.messageName == BuildOperationTaskEnded.name }
-        .compactMap { try? harness.decode($0, as: BuildOperationTaskEnded.self) }
-        .first { $0.id == 1 }
+    XCTAssertFalse(
+      harness.xcodeFrames(on: 1_011).contains {
+        $0.messageName == BuildOperationTaskStarted.name
+          || $0.messageName == BuildOperationTaskEnded.name
+      }
     )
-    XCTAssertFalse(wrapperEnded.signalled)
   }
 
   func testCompletionWinsTerminalRaceBeforeCancel() throws {
     let fixture = try PlanBuilderFixture()
     let executor = RouterFakeExecutor(behavior: .waitForReleaseThenSucceed)
     let harness = RouterHarness(fixture: fixture, executor: executor)
-    let taskEndedAttempt = DispatchSemaphore(value: 0)
-    let allowTaskEnded = DispatchSemaphore(value: 0)
+    let operationEndedAttempt = DispatchSemaphore(value: 0)
+    let allowOperationEnded = DispatchSemaphore(value: 0)
     harness.beforeXcodeSend = { frame in
       guard frame.channel == 1_021,
-        (try? harness.messageName(frame)) == BuildOperationTaskEnded.name
+        (try? harness.messageName(frame)) == BuildOperationEnded.name
       else {
         return
       }
-      taskEndedAttempt.signal()
-      _ = allowTaskEnded.wait(timeout: .now() + 2)
+      operationEndedAttempt.signal()
+      _ = allowOperationEnded.wait(timeout: .now() + 2)
     }
     let request = makeCreateBuildRequest(
       targets: [ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil)],
@@ -691,7 +696,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     )
     XCTAssertEqual(executor.started.wait(timeout: .now() + 2), .success)
     executor.release.signal()
-    XCTAssertEqual(taskEndedAttempt.wait(timeout: .now() + 2), .success)
+    XCTAssertEqual(operationEndedAttempt.wait(timeout: .now() + 2), .success)
 
     XCTAssertTrue(
       try harness.sendClient(
@@ -700,7 +705,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
       )
     )
     XCTAssertEqual(try harness.messageName(on: 188), VoidResponse.name)
-    allowTaskEnded.signal()
+    allowOperationEnded.signal()
     XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationEnded.name))
     let terminals = try harness.xcodeFrames(on: 1_021)
       .filter { $0.messageName == BuildOperationEnded.name }
@@ -1154,7 +1159,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(try harness.messageName(on: 213), ErrorResponse.name)
   }
 
-  func testWrapperTaskIsSignalledOnlyForActualSignalTermination() throws {
+  func testSignalledCancellationEndsOperationWithoutSyntheticTask() throws {
     let fixture = try PlanBuilderFixture()
     let executor = RouterFakeExecutor(behavior: .signalledCancellation)
     let harness = RouterHarness(fixture: fixture, executor: executor)
@@ -1171,13 +1176,19 @@ final class BazelBuildServiceRouterTests: XCTestCase {
       )
     )
     XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationEnded.name))
-    let wrapperEnded = try XCTUnwrap(
+    let operationEnded = try XCTUnwrap(
       harness.xcodeFrames(on: 1_151)
-        .filter { $0.messageName == BuildOperationTaskEnded.name }
-        .compactMap { try? harness.decode($0, as: BuildOperationTaskEnded.self) }
-        .first { $0.id == 1 }
+        .filter { $0.messageName == BuildOperationEnded.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationEnded.self) }
+        .first
     )
-    XCTAssertTrue(wrapperEnded.signalled)
+    XCTAssertEqual(operationEnded.status, .cancelled)
+    XCTAssertFalse(
+      harness.xcodeFrames(on: 1_151).contains {
+        $0.messageName == BuildOperationTaskStarted.name
+          || $0.messageName == BuildOperationTaskEnded.name
+      }
+    )
   }
 
   func testPendingCancelAndShutdownHaveOneTerminalEmitter() throws {

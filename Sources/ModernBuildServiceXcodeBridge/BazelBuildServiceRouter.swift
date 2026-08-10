@@ -154,8 +154,6 @@ private struct NativeActiveBuild {
 private struct OwnedOperationPresentation: Sendable {
   var actionIdentities = Set<String>()
   let targetIDsByGUID: [String: Int]
-  let wrapperTaskID: Int
-  let wrapperTaskSignature: String
   var nextTaskID: Int
 }
 
@@ -1183,7 +1181,6 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         try emitOperationSuffix(
           operation,
           status: terminalStatus,
-          signalled: Self.wasSignalled(result.processCompletion),
           outputs: outputs
         )
       } catch {
@@ -1308,24 +1305,6 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         outputs: outputs
       )
     }
-    try send(
-      SwiftBuildOperationPresenter.encodeTaskStarted(
-        SwiftBuildPresentedTask(
-          commandLineDisplayString: nil,
-          executionDescription: "Build with Bazel",
-          id: operation.presentation.wrapperTaskID,
-          interestingPath: nil,
-          parentID: nil,
-          ruleInfo: "BazelBuild",
-          serializedDiagnosticsPaths: [],
-          stableSignature: operation.presentation.wrapperTaskSignature,
-          targetID: nil,
-          taskName: "Bazel"
-        )
-      ),
-      channel: channel,
-      outputs: outputs
-    )
   }
 
   private func emit(
@@ -1459,9 +1438,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     case .processOutput(let output):
       try send(
         SwiftBuildOperationPresenter.encodeConsoleOutput(
-          data: Array(output.bytes),
-          taskID: operation.presentation.wrapperTaskID,
-          stableSignature: operation.presentation.wrapperTaskSignature
+          data: Array(output.bytes)
         ),
         channel: channel,
         outputs: outputs
@@ -1545,32 +1522,17 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
   private func emitOperationSuffix(
     _ operation: OwnedBuildOperation,
     status: ProxyTerminalStatus,
-    signalled: Bool,
     outputs: BuildServiceFrameOutputs
   ) throws {
-    let taskStatus: SwiftBuildPresentedTaskStatus
     let operationStatus: SwiftBuildPresentedOperationStatus
     switch status {
     case .cancelled:
-      taskStatus = .cancelled
       operationStatus = .cancelled
     case .failed:
-      taskStatus = .failed
       operationStatus = .failed
     case .succeeded:
-      taskStatus = .succeeded
       operationStatus = .succeeded
     }
-    try send(
-      SwiftBuildOperationPresenter.encodeTaskEnded(
-        id: operation.presentation.wrapperTaskID,
-        stableSignature: operation.presentation.wrapperTaskSignature,
-        status: taskStatus,
-        signalled: signalled
-      ),
-      channel: operation.responseChannel,
-      outputs: outputs
-    )
     for target in operation.plan.targets.reversed() {
       guard let id = operation.presentation.targetIDsByGUID[target.mapping.xcodeTargetGUID] else {
         continue
@@ -1591,12 +1553,6 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     )
   }
 
-  private static func wasSignalled(_ completion: ProcessCompletion?) -> Bool {
-    guard let completion else { return false }
-    if case .signalled = completion.termination { return true }
-    return false
-  }
-
   private func makePresentation(for plan: ResolvedBuildPlan) -> OwnedOperationPresentation {
     let targetIDs = Dictionary(
       uniqueKeysWithValues: plan.targets.enumerated().map {
@@ -1605,9 +1561,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     )
     return OwnedOperationPresentation(
       targetIDsByGUID: targetIDs,
-      wrapperTaskID: 1,
-      wrapperTaskSignature: "rules_xcodeproj.bazel.operation.v1:\(plan.operationID)",
-      nextTaskID: 2
+      nextTaskID: 1
     )
   }
 

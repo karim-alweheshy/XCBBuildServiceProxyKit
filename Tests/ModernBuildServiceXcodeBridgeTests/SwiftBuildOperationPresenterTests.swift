@@ -221,6 +221,20 @@ final class SwiftBuildOperationPresenterTests: XCTestCase {
     XCTAssertNil(console.targetID)
   }
 
+  func testPresenterConstructsOperationLevelConsoleOutput() throws {
+    let console = try decode(
+      SwiftBuildOperationPresenter.encodeConsoleOutput(
+        data: Array("bazel output\n".utf8)
+      ),
+      as: BuildOperationConsoleOutputEmitted.self
+    )
+
+    XCTAssertEqual(console.data, Array("bazel output\n".utf8))
+    XCTAssertNil(console.taskID)
+    XCTAssertNil(console.taskSignature)
+    XCTAssertNil(console.targetID)
+  }
+
   func testPresenterConstructsEveryDiagnosticKindAndSortsTraits() throws {
     for kind in SwiftBuildPresentedDiagnosticKind.allCases {
       let diagnostic = try decode(
