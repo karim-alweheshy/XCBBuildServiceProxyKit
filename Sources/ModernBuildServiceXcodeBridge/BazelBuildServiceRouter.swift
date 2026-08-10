@@ -1449,14 +1449,30 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         _ = action
         return
       case .progress(let progress):
-        let percent =
-          progress.total.map {
-            $0 == 0 ? -1 : (Double(progress.completed) / Double($0)) * 100
-          } ?? -1
-        let message =
-          progress.total.map {
-            "Bazel actions: \(progress.completed)/\($0)"
-          } ?? "Bazel actions completed: \(progress.completed)"
+        let reportsNoRunningAction =
+          progress.activity?.lowercased() == "no actions running"
+        let percent: Double
+        if reportsNoRunningAction {
+          percent = -1
+        } else {
+          percent =
+            progress.total.map {
+              $0 == 0 ? -1 : min((Double(progress.completed) / Double($0)) * 100, 99)
+            } ?? -1
+        }
+        let fraction = progress.total.map {
+          "\(progress.completed)/\($0) estimated"
+        }
+        let message: String
+        if let activity = progress.activity, let fraction {
+          message = "Bazel: \(activity) — \(fraction)"
+        } else if let activity = progress.activity {
+          message = "Bazel: \(activity)"
+        } else if let fraction {
+          message = "Bazel progress: \(fraction)"
+        } else {
+          message = "Bazel progress: \(progress.completed) completed"
+        }
         try send(
           SwiftBuildOperationPresenter.encodeProgressUpdated(
             statusMessage: message,

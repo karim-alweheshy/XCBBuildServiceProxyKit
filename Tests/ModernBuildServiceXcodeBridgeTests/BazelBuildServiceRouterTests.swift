@@ -120,14 +120,28 @@ final class BazelBuildServiceRouterTests: XCTestCase {
       upToDateStarted.info.executionDescription,
       "Archive App — Up to date (cache source unavailable)"
     )
-    let progressMessages = harness.xcodeFrames(on: 201)
+    let progressUpdates = harness.xcodeFrames(on: 201)
       .filter { $0.messageName == BuildOperationProgressUpdated.name }
       .compactMap { try? harness.decode($0, as: BuildOperationProgressUpdated.self) }
-      .map(\.statusMessage)
     XCTAssertTrue(
-      progressMessages.contains(
-        "Bazel presented 2 actions: 0 executed, 0 cache hits, 1 completed (cache outcome not reported), 1 up-to-date"
-      )
+      progressUpdates.contains {
+        $0.statusMessage
+          == "Bazel presented 2 actions: 0 executed, 0 cache hits, 1 completed (cache outcome not reported), 1 up-to-date"
+      }
+    )
+    XCTAssertTrue(
+      progressUpdates.contains {
+        $0.statusMessage == "Bazel: Compiling App.swift — 1/2 estimated"
+          && $0.percentComplete == 50
+          && !$0.showInLog
+      }
+    )
+    XCTAssertTrue(
+      progressUpdates.contains {
+        $0.statusMessage == "Bazel: no actions running — 2/2 estimated"
+          && $0.percentComplete == -1
+          && !$0.showInLog
+      }
     )
     let ended = try SwiftBuildProtocolCodec.decodeBuildOperationEnded(
       try XCTUnwrap(harness.xcodeFrames(on: 201).last).payload
@@ -1384,7 +1398,29 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
           )
         )
         try await onEvent(
-          .bep(.progress(ProxyProgress(completed: 1, source: .interactiveHint, total: 2))))
+          .bep(
+            .progress(
+              ProxyProgress(
+                activity: "Compiling App.swift",
+                completed: 1,
+                source: .interactiveHint,
+                total: 2
+              )
+            )
+          )
+        )
+        try await onEvent(
+          .bep(
+            .progress(
+              ProxyProgress(
+                activity: "no actions running",
+                completed: 2,
+                source: .interactiveHint,
+                total: 2
+              )
+            )
+          )
+        )
         try await onEvent(
           .bep(
             .actionCompleted(

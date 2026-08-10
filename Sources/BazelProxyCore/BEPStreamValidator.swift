@@ -276,14 +276,15 @@ public struct BEPStreamValidator: Sendable {
     var events = [BEPEvent]()
     if let progress = object["progress"] as? [String: Any],
       let standardError = progress["stderr"] as? String,
-      let fraction = Self.parseProgress(in: standardError)
+      let progress = Self.parseProgress(in: standardError)
     {
       events.append(
         .progress(
           ProxyProgress(
-            completed: fraction.completed,
+            activity: progress.activity,
+            completed: progress.completed,
             source: .interactiveHint,
-            total: fraction.total
+            total: progress.total
           )
         )
       )
@@ -366,27 +367,84 @@ public struct BEPStreamValidator: Sendable {
     return events
   }
 
-  private static func parseProgress(in text: String) -> (completed: Int, total: Int)? {
-    var best: (completed: Int, total: Int)?
+  private static func parseProgress(
+    in text: String
+  ) -> (activity: String?, completed: Int, total: Int)? {
+    var best: (activity: String?, completed: Int, total: Int)?
     for line in text.split(whereSeparator: \Character.isNewline) {
-      guard let open = line.firstIndex(of: "["),
-        let close = line[open...].firstIndex(of: "]")
+      let sanitizedLine = strippingTerminalEscapes(from: line)
+      guard let open = sanitizedLine.firstIndex(of: "["),
+        let close = sanitizedLine[open...].firstIndex(of: "]")
       else { continue }
-      let fraction = line[line.index(after: open)..<close]
+      let fraction = sanitizedLine[sanitizedLine.index(after: open)..<close]
         .split(separator: "/", maxSplits: 1)
-        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .map(String.init)
       guard fraction.count == 2,
-        let completed = Int(fraction[0]),
-        let total = Int(fraction[1]),
+        let completed = parseProgressNumber(fraction[0]),
+        let total = parseProgressNumber(fraction[1]),
         total > 0,
         completed >= 0,
         completed <= total
       else { continue }
+      let suffix = sanitizedLine[sanitizedLine.index(after: close)...]
+        .trimmingCharacters(in: .whitespaces)
+      let activity = suffix.isEmpty ? nil : String(suffix.prefix(512))
       if best == nil || completed > best!.completed || total > best!.total {
-        best = (completed, total)
+        best = (activity, completed, total)
       }
     }
     return best
+  }
+
+  private static func parseProgressNumber(_ value: String) -> Int? {
+    let normalized = value.filter { character in
+      character != "," && !character.isWhitespace
+    }
+    guard !normalized.isEmpty, normalized.allSatisfy(\.isNumber) else { return nil }
+    return Int(normalized)
+  }
+
+  /// Bazel's terminal reporter wraps progress in ANSI control sequences even when it is copied
+  /// into a JSON BEP progress payload. Retain printable text only and consume CSI/OSC sequences so
+  /// control bytes never reach Xcode's status message.
+  private static func strippingTerminalEscapes(from line: Substring) -> String {
+    enum State {
+      case controlSequence
+      case escape
+      case operatingSystemCommand
+      case plain
+    }
+
+    var state = State.plain
+    var result = String.UnicodeScalarView()
+    for scalar in line.unicodeScalars {
+      switch state {
+      case .plain:
+        if scalar.value == 0x1B {
+          state = .escape
+        } else if scalar.value >= 0x20 && scalar.value != 0x7F {
+          result.append(scalar)
+        }
+      case .escape:
+        switch scalar.value {
+        case 0x5B:
+          state = .controlSequence
+        case 0x5D:
+          state = .operatingSystemCommand
+        default:
+          state = .plain
+        }
+      case .controlSequence:
+        if (0x40...0x7E).contains(scalar.value) {
+          state = .plain
+        }
+      case .operatingSystemCommand:
+        if scalar.value == 0x07 {
+          state = .plain
+        }
+      }
+    }
+    return String(result)
   }
 
   private static func nonnegativeInteger(_ value: Any?) -> Int? {
