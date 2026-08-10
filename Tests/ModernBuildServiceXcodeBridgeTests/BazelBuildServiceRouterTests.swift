@@ -1391,6 +1391,21 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
         try await onEvent(
           .action(
             BazelPresentedAction(
+              completed: BEPActionCompleted(
+                commandLineDisplayString: "swiftc -c App.swift",
+                configuration: "debug",
+                identity: "//app:App|App.app|debug",
+                label: "//app:App",
+                mnemonic: "SwiftCompile",
+                primaryOutput: "App.app",
+                succeeded: true
+              )
+            )
+          )
+        )
+        try await onEvent(
+          .action(
+            BazelPresentedAction(
               upToDate: BazelConfiguredAction(
                 configuration: "debug",
                 label: "//app:App",
