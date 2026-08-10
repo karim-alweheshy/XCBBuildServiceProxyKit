@@ -1363,7 +1363,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         }
         status = .succeeded
       case .completed(let succeeded):
-        executionDescription = "\(actionName) — Completed (cache status unavailable)"
+        executionDescription = "\(actionName) — Completed (cache outcome not reported)"
         status = succeeded ? .succeeded : .failed
       case .executed(let succeeded, let runner):
         let executionState: String
@@ -1428,7 +1428,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       try send(
         SwiftBuildOperationPresenter.encodeProgressUpdated(
           statusMessage:
-            "Bazel presented \(summary.presented) \(Self.actionWord(summary.presented)): \(summary.executed) executed, \(summary.cacheHits) cache hits, \(summary.completedStatusUnavailable) completed (cache status unavailable), \(summary.upToDate) up-to-date",
+            "Bazel presented \(summary.presented) \(Self.actionWord(summary.presented)): \(summary.executed) executed, \(summary.cacheHits) cache hits, \(summary.completedStatusUnavailable) completed (cache outcome not reported), \(summary.upToDate) up-to-date",
           percentComplete: 100,
           showInLog: true
         ),
