@@ -239,6 +239,11 @@ final class InvocationReceiptTests: XCTestCase {
 
   func testRejectsSafeButUndeclaredEnvironmentKeyAndAllowsGeneratedKey() throws {
     let fixture = try ManifestFixture()
+    var manifest = fixture.baseManifest()
+    var manifestInvocation = try XCTUnwrap(manifest["invocation"] as? [String: Any])
+    manifestInvocation["bazelEnvironmentKeys"] = ["CUSTOM_BAZEL_ENV"]
+    manifest["invocation"] = manifestInvocation
+    try fixture.writeManifest(manifest)
     let plan = try fixture.plan(operationID: "receipt-environment-contract")
     let invocation = try AdapterInvocationFactory(
       operationRootURL: fixture.rootURL.appendingPathComponent("operations")
@@ -251,8 +256,15 @@ final class InvocationReceiptTests: XCTestCase {
       try InvocationReceiptValidator.loadAndValidate(for: plan, invocation: invocation)
     )
 
+    var declared = validReceipt(plan: plan, invocation: invocation)
+    declared["environmentKeys"] = ["CUSTOM_BAZEL_ENV"]
+    try writeReceipt(declared, to: invocation.receiptURL)
+    XCTAssertNoThrow(
+      try InvocationReceiptValidator.loadAndValidate(for: plan, invocation: invocation)
+    )
+
     var undeclared = validReceipt(plan: plan, invocation: invocation)
-    undeclared["environmentKeys"] = ["CUSTOM_BAZEL_ENV"]
+    undeclared["environmentKeys"] = ["OTHER_BAZEL_ENV"]
     try writeReceipt(undeclared, to: invocation.receiptURL)
     XCTAssertThrowsError(
       try InvocationReceiptValidator.loadAndValidate(for: plan, invocation: invocation)
