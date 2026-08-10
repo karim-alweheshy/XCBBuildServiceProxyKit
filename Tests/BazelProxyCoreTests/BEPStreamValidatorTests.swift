@@ -64,6 +64,33 @@ final class BEPStreamValidatorTests: XCTestCase {
     XCTAssertFalse(String(describing: result).contains(secretMarker))
   }
 
+  func testAcceptsBoundedLargeIgnoredNamedSetEvent() throws {
+    let path = String(repeating: "a", count: 512)
+    let files = (0..<4_000)
+      .map { #"{"name":""# + path + "\($0)\"}" }
+      .joined(separator: ",")
+    let namedSet =
+      #"{"id":{"namedSet":{"id":"large"}},"namedSetOfFiles":{"files":["#
+      + files + "]}}\n"
+    let data = Data(namedSet.utf8)
+    XCTAssertGreaterThan(data.count, 1024 * 1024)
+    XCTAssertLessThan(data.count, BEPStreamLimits().maximumLineBytes)
+    var validator = try BEPStreamValidator()
+    var events = [BEPEvent]()
+
+    for chunk in data.chunks(of: 64 * 1024) {
+      events.append(contentsOf: try validator.consume(chunk))
+    }
+    events.append(
+      contentsOf: try validator.consume(
+        Data((#"{"finished":{"overallSuccess":true}}"# + "\n").utf8)
+      )
+    )
+
+    XCTAssertEqual(events, [.finished(succeeded: true)])
+    XCTAssertTrue(try validator.finish().succeeded)
+  }
+
   func testRejectsMalformedTruncatedAndOversizedInput() throws {
     var malformed = try BEPStreamValidator()
     XCTAssertThrowsError(try malformed.consume(Data("not-json\n".utf8))) { error in
