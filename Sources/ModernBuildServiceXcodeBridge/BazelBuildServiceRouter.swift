@@ -1349,7 +1349,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
           .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
       }
       let actionName = action.taskTitle
-      let executionDescription: String
+      var executionDescription: String
       let status: SwiftBuildPresentedTaskStatus
       switch action.disposition {
       case .cacheHit(let kind):
@@ -1383,6 +1383,15 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         executionDescription = "\(actionName) — Up to date (cache source unavailable)"
         status = .succeeded
       }
+      // BEP publishes ActionExecuted only after completion. Xcode therefore receives this task's
+      // started and ended messages together and renders their receipt interval (usually 0.1 s),
+      // even though the ended message carries accurate process metrics. Keep the wire metrics and
+      // also put Bazel's recorded duration in the visible description.
+      let timingDescription =
+        action.timing.map {
+          " — Bazel-recorded action time \(Self.formatActionDuration($0.durationMicroseconds))"
+        } ?? ""
+      executionDescription += timingDescription
       let ruleInfo = [
         action.mnemonic,
         label,
@@ -1413,7 +1422,8 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
           id: taskID,
           stableSignature: signature,
           status: status,
-          signalled: false
+          signalled: false,
+          metrics: Self.taskMetrics(for: action.timing)
         ),
         channel: channel,
         outputs: outputs
@@ -1511,6 +1521,37 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
         break
       }
     }
+  }
+
+  private static func taskMetrics(
+    for timing: BazelExecutionTiming?
+  ) -> SwiftBuildPresentedTaskMetrics? {
+    // Swift Build uses Core Foundation's 2001 reference date, while Bazel's protobuf Timestamp
+    // uses the Unix epoch. CPU time and RSS are not present in Bazel's compact spawn metrics.
+    let referenceDateOffsetMicroseconds: UInt64 = 978_307_200_000_000
+    guard let timing,
+      timing.startTimeUnixMicroseconds >= referenceDateOffsetMicroseconds
+    else { return nil }
+    return SwiftBuildPresentedTaskMetrics(
+      userTimeMicroseconds: 0,
+      systemTimeMicroseconds: 0,
+      maximumResidentSetSizeBytes: 0,
+      wallClockStartTimeMicrosecondsSinceReferenceDate: timing.startTimeUnixMicroseconds
+        - referenceDateOffsetMicroseconds,
+      wallClockDurationMicroseconds: timing.durationMicroseconds
+    )
+  }
+
+  private static func formatActionDuration(_ microseconds: UInt64) -> String {
+    if microseconds < 1_000 {
+      return "\(microseconds) µs"
+    }
+    if microseconds < 1_000_000 {
+      let milliseconds = Double(microseconds) / 1_000
+      return String(format: "%.3f ms", locale: Locale(identifier: "en_US_POSIX"), milliseconds)
+    }
+    let seconds = Double(microseconds) / 1_000_000
+    return String(format: "%.3f s", locale: Locale(identifier: "en_US_POSIX"), seconds)
   }
 
   private static func actionWord(_ count: Int) -> String {

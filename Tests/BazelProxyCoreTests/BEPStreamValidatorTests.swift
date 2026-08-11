@@ -7,7 +7,7 @@ final class BEPStreamValidatorTests: XCTestCase {
   func testIncrementallyParsesAllowlistedEventsAndTerminalResult() throws {
     let lines = [
       #"{"progress":{"stderr":"\u001b[32m[1,217 / 1,504]\u001b[0m [Prepa] Compiling App.swift\n"}}"#,
-      #"{"id":{"actionCompleted":{"configuration":"sim-arm64","label":"//app:App","primaryOutput":"bazel-out/App.app"}},"action":{"success":true,"type":"SwiftCompile"}}"#,
+      #"{"id":{"actionCompleted":{"configuration":"sim-arm64","label":"//app:App","primaryOutput":"bazel-out/App.app"}},"action":{"success":true,"type":"SwiftCompile","startTime":"2026-08-11T00:28:11.517582Z","endTime":"2026-08-11T00:29:01.915582Z"}}"#,
       #"{"id":{"targetCompleted":{"label":"//app:App"}},"completed":{"success":true}}"#,
       #"{"buildMetrics":{"actionSummary":{"actionsExecuted":"7"}}}"#,
       #"{"finished":{"overallSuccess":true}}"#,
@@ -43,7 +43,11 @@ final class BEPStreamValidatorTests: XCTestCase {
             label: "//app:App",
             mnemonic: "SwiftCompile",
             primaryOutput: "bazel-out/App.app",
-            succeeded: true
+            succeeded: true,
+            timing: BazelExecutionTiming(
+              startTimeUnixMicroseconds: 1_786_408_091_517_582,
+              durationMicroseconds: 50_398_000
+            )
           )
         )
       )
@@ -54,6 +58,68 @@ final class BEPStreamValidatorTests: XCTestCase {
     )
     XCTAssertEqual(result.reportedExecutedActionCount, 7)
     XCTAssertTrue(result.succeeded)
+  }
+
+  func testActionTimingAcceptsCanonicalPrecisionAndRejectsInvalidIntervals() throws {
+    func actionLine(start: String?, end: String?) -> Data {
+      var timing = ""
+      if let start { timing += ",\"startTime\":\"" + start + "\"" }
+      if let end { timing += ",\"endTime\":\"" + end + "\"" }
+      return Data(
+        (#"{"id":{"actionCompleted":{"configuration":"sim","label":"//app:App","primaryOutput":"out"}},"action":{"success":true"#
+          + timing + "}}\n").utf8
+      )
+    }
+
+    var noFraction = try BEPStreamValidator()
+    XCTAssertEqual(
+      try noFraction.consume(
+        actionLine(start: "2026-08-11T00:28:11Z", end: "2026-08-11T00:28:12Z")
+      ).first,
+      .actionCompleted(
+        BEPActionCompleted(
+          configuration: "sim",
+          identity: "//app:App|out|sim",
+          label: "//app:App",
+          mnemonic: nil,
+          primaryOutput: "out",
+          succeeded: true,
+          timing: BazelExecutionTiming(
+            startTimeUnixMicroseconds: 1_786_408_091_000_000,
+            durationMicroseconds: 1_000_000
+          )
+        )
+      )
+    )
+
+    var nanoseconds = try BEPStreamValidator()
+    guard
+      case .actionCompleted(let completed) = try XCTUnwrap(
+        nanoseconds.consume(
+          actionLine(
+            start: "2026-08-11T00:28:11.123456789Z",
+            end: "2026-08-11T00:28:12.123456999Z"
+          )
+        ).first
+      )
+    else {
+      return XCTFail("Expected an action-completed event")
+    }
+    XCTAssertEqual(completed.timing?.durationMicroseconds, 1_000_000)
+
+    for invalid in [
+      actionLine(start: "2026-08-11T00:28:11Z", end: nil),
+      actionLine(start: "2026-02-30T00:28:11Z", end: "2026-03-01T00:28:11Z"),
+      actionLine(
+        start: "2026-08-11T00:28:12.000001Z",
+        end: "2026-08-11T00:28:12Z"
+      ),
+    ] {
+      var validator = try BEPStreamValidator()
+      XCTAssertThrowsError(try validator.consume(invalid)) { error in
+        XCTAssertEqual(error as? BEPStreamError, .malformedJSONLine)
+      }
+    }
   }
 
   func testEnvironmentBearingEventProducesNoRetainedPayload() throws {
