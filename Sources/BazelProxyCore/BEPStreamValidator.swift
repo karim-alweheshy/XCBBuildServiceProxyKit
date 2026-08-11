@@ -34,10 +34,17 @@ public struct BEPActionCompleted: Equatable, Sendable {
 
 public enum BEPEvent: Equatable, Sendable {
   case actionCompleted(BEPActionCompleted)
+  case buildMetadata(BazelBuildMetadata)
   case progress(ProxyProgress)
   case reportedExecutedActionCount(Int)
   case targetCompleted(label: String, succeeded: Bool)
   case finished(succeeded: Bool)
+}
+
+public enum BazelBuildMetadata: Equatable, Hashable, Sendable {
+  case invocation(buildToolVersion: String, id: String)
+  case remoteCache(String)
+  case resultsURL(String)
 }
 
 extension BEPEvent {
@@ -158,6 +165,8 @@ public struct BEPStreamValidator: Sendable {
   private var completedActionIDs = Set<String>()
   private var failedActionIDs = Set<String>()
   private var failedTargetLabels = Set<String>()
+  private var invocationID: String?
+  private var emittedBuildMetadata = Set<BazelBuildMetadata>()
   private var finishedResult: Bool?
   private var isFinished = false
   private var pending = Data()
@@ -277,6 +286,7 @@ public struct BEPStreamValidator: Sendable {
     }
 
     var events = [BEPEvent]()
+    events.append(contentsOf: parseBuildMetadata(in: object))
     if let progress = object["progress"] as? [String: Any],
       let standardError = progress["stderr"] as? String,
       let progress = Self.parseProgress(in: standardError)
@@ -370,6 +380,119 @@ public struct BEPStreamValidator: Sendable {
       events.append(.finished(succeeded: succeeded))
     }
     return events
+  }
+
+  private mutating func parseBuildMetadata(in object: [String: Any]) -> [BEPEvent] {
+    var events = [BEPEvent]()
+
+    if let started = object["started"] as? [String: Any],
+      let rawInvocationID = started["uuid"] as? String,
+      let uuid = UUID(uuidString: rawInvocationID)
+    {
+      let invocationID = uuid.uuidString.lowercased()
+      if self.invocationID == nil {
+        self.invocationID = invocationID
+      }
+      if self.invocationID == invocationID,
+        let version = Self.safeDisplayValue(started["buildToolVersion"], maximumBytes: 128)
+      {
+        appendBuildMetadata(
+          .invocation(buildToolVersion: version, id: invocationID),
+          to: &events
+        )
+      }
+    }
+
+    if let identifier = object["id"] as? [String: Any],
+      let commandLineID = identifier["structuredCommandLine"] as? [String: Any],
+      commandLineID["commandLineLabel"] as? String == "canonical",
+      let commandLine = object["structuredCommandLine"] as? [String: Any],
+      let invocationID,
+      let resultsURL = Self.resultsURL(
+        in: commandLine,
+        invocationID: invocationID
+      )
+    {
+      appendBuildMetadata(.resultsURL(resultsURL), to: &events)
+    }
+
+    if let payload = object["buildMetadata"] as? [String: Any],
+      let metadata = payload["metadata"] as? [String: Any],
+      let remoteCache = Self.safeDisplayValue(metadata["REMOTE_CACHE"], maximumBytes: 128)
+    {
+      appendBuildMetadata(.remoteCache(remoteCache), to: &events)
+    }
+
+    return events
+  }
+
+  private mutating func appendBuildMetadata(
+    _ metadata: BazelBuildMetadata,
+    to events: inout [BEPEvent]
+  ) {
+    guard emittedBuildMetadata.insert(metadata).inserted else { return }
+    events.append(.buildMetadata(metadata))
+  }
+
+  private static func safeDisplayValue(_ value: Any?, maximumBytes: Int) -> String? {
+    guard let value = value as? String else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty,
+      trimmed.utf8.count <= maximumBytes,
+      trimmed.unicodeScalars.allSatisfy({ scalar in
+        (0x20...0x7E).contains(scalar.value)
+      })
+    else { return nil }
+    return trimmed
+  }
+
+  private static func resultsURL(
+    in commandLine: [String: Any],
+    invocationID: String
+  ) -> String? {
+    guard let sections = commandLine["sections"] as? [[String: Any]] else { return nil }
+    let candidates = sections.compactMap { section -> [[String: Any]]? in
+      guard section["sectionLabel"] as? String == "command options",
+        let optionList = section["optionList"] as? [String: Any]
+      else { return nil }
+      return optionList["option"] as? [[String: Any]]
+    }
+    .flatMap { $0 }
+    .compactMap { option -> String? in
+      guard option["optionName"] as? String == "bes_results_url" else { return nil }
+      return option["optionValue"] as? String
+    }
+    let distinctCandidates = Set(candidates)
+    guard distinctCandidates.count == 1, let base = distinctCandidates.first else { return nil }
+    return safeResultsURL(base: base, invocationID: invocationID)
+  }
+
+  private static func safeResultsURL(base: String, invocationID: String) -> String? {
+    guard !base.isEmpty,
+      base.utf8.count <= 2_048 - invocationID.utf8.count,
+      base.unicodeScalars.allSatisfy({ (0x21...0x7E).contains($0.value) })
+    else { return nil }
+    let candidate = base + invocationID
+    guard var components = URLComponents(string: candidate),
+      components.host != nil,
+      components.user == nil,
+      components.password == nil,
+      components.query == nil,
+      components.fragment == nil
+    else { return nil }
+
+    switch components.scheme?.lowercased() {
+    case "https":
+      break
+    case "http":
+      let host = components.host?.lowercased()
+      guard host == "localhost" || host == "127.0.0.1" || host == "::1" else { return nil }
+    default:
+      return nil
+    }
+    components.scheme = components.scheme?.lowercased()
+    guard components.string == candidate else { return nil }
+    return candidate
   }
 
   private static func parseActionTiming(
