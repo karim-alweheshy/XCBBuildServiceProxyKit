@@ -59,6 +59,7 @@ final class AdapterInvocationTests: XCTestCase {
         AdapterInvocationFactory.actionStartsEnvironmentKey,
         AdapterInvocationFactory.bepEnvironmentKey,
         AdapterInvocationFactory.executionLogEnvironmentKey,
+        AdapterInvocationFactory.profileEnvironmentKey,
         AdapterInvocationFactory.receiptEnvironmentKey,
         AdapterInvocationFactory.requestDirectoryEnvironmentKey,
       ]
@@ -74,6 +75,11 @@ final class AdapterInvocationTests: XCTestCase {
       invocation.executionLogURL.path
     )
     XCTAssertEqual(invocation.executionLogURL.lastPathComponent, "execution-log")
+    XCTAssertEqual(
+      invocation.environment[AdapterInvocationFactory.profileEnvironmentKey],
+      invocation.profileURL.path
+    )
+    XCTAssertEqual(invocation.profileURL.lastPathComponent, "bazel-profile.json.gz")
     XCTAssertEqual(
       invocation.environment[AdapterInvocationFactory.requestDirectoryEnvironmentKey],
       invocation.requestDirectoryURL.path

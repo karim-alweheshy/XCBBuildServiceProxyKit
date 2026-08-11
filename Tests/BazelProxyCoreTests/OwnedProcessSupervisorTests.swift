@@ -225,6 +225,7 @@ final class OwnedProcessSupervisorTests: XCTestCase {
       executionLogURL: invocation.executionLogURL,
       executableURL: invocation.executableURL,
       operationDirectoryURL: invocation.operationDirectoryURL,
+      profileURL: invocation.profileURL,
       receiptURL: invocation.receiptURL,
       requestDirectoryURL: invocation.requestDirectoryURL,
       workingDirectoryURL: invocation.workingDirectoryURL
