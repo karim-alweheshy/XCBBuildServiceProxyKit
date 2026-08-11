@@ -52,7 +52,8 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     let ended = try harness.decode(frames[endedIndex], as: BuildOperationTaskEnded.self)
     XCTAssertEqual(started.info.taskName, "Compile Swift module App")
     XCTAssertEqual(started.info.executionDescription, "Compile Swift module App")
-    XCTAssertEqual(started.info.ruleInfo, "SwiftCompile //app:App @@platforms//host:host")
+    XCTAssertEqual(started.info.ruleInfo, "SwiftCompile //dependency:Lib @@platforms//host:host")
+    XCTAssertEqual(started.targetID, 1)
     XCTAssertEqual(ended.signature, BuildOperationTaskSignature(rawValue: started.info.signature))
     XCTAssertEqual(
       ended.metrics,
@@ -64,6 +65,39 @@ final class BazelBuildServiceRouterTests: XCTestCase {
         wcDuration: 2_345_678
       )
     )
+  }
+
+  func testMultiTargetBuildDoesNotGuessOwnershipForTransitiveAction() throws {
+    let fixture = try PlanBuilderFixture(includeSecondTarget: true)
+    let executor = RouterFakeExecutor(behavior: .waitForReleaseAfterActionStart)
+    let harness = RouterHarness(fixture: fixture, executor: executor)
+    let create = makeCreateBuildRequest(
+      targets: [
+        ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil),
+        ConfiguredTargetMessagePayload(guid: "EXT_GUID", parameters: nil),
+      ],
+      responseChannel: 202
+    )
+
+    XCTAssertTrue(try harness.sendClient(create, channel: 103))
+    XCTAssertEqual(try harness.createdID(on: 103), -1)
+    XCTAssertTrue(
+      try harness.sendClient(
+        BuildStartRequest(sessionHandle: create.sessionHandle, id: -1),
+        channel: 104
+      )
+    )
+    XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationTaskStarted.name))
+    let started = try XCTUnwrap(
+      harness.xcodeFrames(on: 202)
+        .filter { $0.messageName == BuildOperationTaskStarted.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationTaskStarted.self) }
+        .first
+    )
+    XCTAssertNil(started.targetID)
+
+    executor.release.signal()
+    XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationEnded.name))
   }
 
   func testPresentsCacheAndWorkerActionDetailsWithCommands() throws {
@@ -103,6 +137,7 @@ final class BazelBuildServiceRouterTests: XCTestCase {
       "Link App — Executed with worker — Bazel-recorded action time 1.250 s"
     )
     XCTAssertEqual(worker.info.commandLineDisplayString, "actual-clang -o App")
+    XCTAssertEqual(worker.targetID, 1)
 
     let ended = harness.xcodeFrames(on: 201)
       .filter { $0.messageName == BuildOperationTaskEnded.name }
@@ -1701,7 +1736,7 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
         )
         let link = BazelConfiguredAction(
           configuration: "debug",
-          label: "//app:App",
+          label: "//dependency:Lib",
           mnemonic: "ObjcLink",
           primaryOutput: "App"
         )
@@ -1717,7 +1752,7 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
                 mnemonic: "ObjcLink",
                 runner: "worker",
                 status: "SUCCESS",
-                targetLabel: "//app:App",
+                targetLabel: "//dependency:Lib",
                 timing: BazelExecutionTiming(
                   startTimeUnixMicroseconds: 978_307_230_000_000,
                   durationMicroseconds: 1_250_000
@@ -1752,7 +1787,7 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
               configuration: "debug",
               description: "Compiling Swift module App",
               executionPlatform: "@@platforms//host:host",
-              label: "//app:App",
+              label: "//dependency:Lib",
               mnemonic: "SwiftCompile",
               observedTimeUnixMicroseconds: 978_307_225_001_000,
               sequence: 1
@@ -1768,8 +1803,8 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
         let completed = BEPActionCompleted(
           commandLineDisplayString: "swiftc -c App.swift",
           configuration: "debug",
-          identity: "//app:App|App.swiftmodule|debug",
-          label: "//app:App",
+          identity: "//dependency:Lib|App.swiftmodule|debug",
+          label: "//dependency:Lib",
           mnemonic: "SwiftCompile",
           primaryOutput: "App.swiftmodule",
           succeeded: true,

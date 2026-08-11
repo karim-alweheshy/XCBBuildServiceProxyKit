@@ -1481,10 +1481,9 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       let taskID = adjacentAction.taskID
       let signature = "rules_xcodeproj.bazel.action.v1:\(action.identity)"
       let label = action.label.isEmpty ? nil : action.label
-      let targetID = label.flatMap { actionLabel in
-        operation.plan.targets.first { $0.mapping.bazelLabel == actionLabel }
-          .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
-      }
+      let targetID =
+        label.flatMap { Self.targetID(for: $0, operation: operation) }
+        ?? Self.soleTargetID(operation: operation)
       let actionName = action.taskTitle
       var executionDescription: String
       let status: SwiftBuildPresentedTaskStatus
@@ -1716,10 +1715,23 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     operation: OwnedBuildOperation
   ) -> Int? {
     let normalized = normalizedLabel(label)
-    return operation.plan.targets.first {
+    if let exact = operation.plan.targets.first(where: {
       normalizedLabel($0.mapping.bazelLabel) == normalized
+    }).flatMap({ operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }) {
+      return exact
     }
-    .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
+    return soleTargetID(operation: operation)
+  }
+
+  /// Xcode places tasks without a target ID under `Prepare build`. For an operation with exactly
+  /// one requested target, every Bazel action belongs to that target even when its owner label is
+  /// a transitive dependency or an auxiliary tool target. Multi-target operations retain exact
+  /// label attribution until shared-action ownership exists in the generated project contract.
+  private static func soleTargetID(operation: OwnedBuildOperation) -> Int? {
+    guard operation.plan.targets.count == 1, let target = operation.plan.targets.first else {
+      return nil
+    }
+    return operation.presentation.targetIDsByGUID[target.mapping.xcodeTargetGUID]
   }
 
   private static func bestLiveTaskIndex(
