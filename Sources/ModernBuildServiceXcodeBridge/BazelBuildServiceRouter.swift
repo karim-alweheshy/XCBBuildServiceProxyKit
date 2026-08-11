@@ -153,8 +153,30 @@ private struct NativeActiveBuild {
 
 private struct OwnedOperationPresentation: Sendable {
   var actionIdentities = Set<String>()
+  var liveActionTasksByKey = [LiveActionJoinKey: [OpenLiveActionTask]]()
+  var pendingActionCompletionsByKey = [LiveActionJoinKey: [BEPActionCompleted]]()
   let targetIDsByGUID: [String: Int]
   var nextTaskID: Int
+}
+
+private struct LiveActionJoinKey: Hashable, Sendable {
+  let configuration: String
+  let label: String
+  let mnemonic: String
+}
+
+private struct OpenLiveActionTask: Sendable {
+  let id: Int
+  let signature: String
+  let start: BazelActionStarted
+  let targetID: Int?
+}
+
+private struct LiveActionEndEmission: Sendable {
+  let id: Int
+  let metrics: SwiftBuildPresentedTaskMetrics?
+  let signature: String
+  let status: SwiftBuildPresentedTaskStatus
 }
 
 private struct OwnedBuildOperation {
@@ -1175,6 +1197,11 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     )
     if let terminalStatus {
       do {
+        try emitOutstandingActionEnds(
+          operationID: operationID,
+          status: terminalStatus,
+          outputs: outputs
+        )
         if terminalStatus == .failed, let failure = result.failure {
           try emitFailure(failure, operation: operation, outputs: outputs)
         }
@@ -1319,21 +1346,88 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       condition.unlock()
       return
     }
-    let presentedAction: BazelPresentedAction?
+    var adjacentAction: (action: BazelPresentedAction, taskID: Int)?
+    var liveStart: (start: BazelActionStarted, task: OpenLiveActionTask)?
+    var liveEnd: LiveActionEndEmission?
     switch event {
-    case .action(let action):
-      presentedAction = action
-    case .bep(.actionCompleted(let action)) where action.succeeded != nil:
-      presentedAction = BazelPresentedAction(completed: action)
-    default:
-      presentedAction = nil
-    }
-    var actionTaskID: Int?
-    if let presentedAction,
-      operation.presentation.actionIdentities.insert(presentedAction.identity).inserted
-    {
-      actionTaskID = operation.presentation.nextTaskID
+    case .actionStarted(let start):
+      let taskID = operation.presentation.nextTaskID
       operation.presentation.nextTaskID += 1
+      let task = OpenLiveActionTask(
+        id: taskID,
+        signature: "rules_xcodeproj.bazel.live-action.v1:\(start.sequence)",
+        start: start,
+        targetID: Self.targetID(for: start.label, operation: operation)
+      )
+      let key = Self.liveActionKey(for: start)
+      liveStart = (start, task)
+      if var pending = operation.presentation.pendingActionCompletionsByKey[key],
+        let index = Self.bestCompletionIndex(for: start, candidates: pending)
+      {
+        let completion = pending.remove(at: index)
+        operation.presentation.pendingActionCompletionsByKey[key] = pending.isEmpty ? nil : pending
+        operation.presentation.actionIdentities.insert(completion.identity)
+        liveEnd = LiveActionEndEmission(
+          id: task.id,
+          metrics: Self.taskMetrics(for: completion.timing),
+          signature: task.signature,
+          status: completion.succeeded == true ? .succeeded : .failed
+        )
+      } else {
+        operation.presentation.liveActionTasksByKey[key, default: []].append(task)
+      }
+    case .bep(.actionCompleted(let action)) where action.succeeded != nil:
+      let key = Self.liveActionKey(for: action)
+      if var tasks = operation.presentation.liveActionTasksByKey[key],
+        let index = Self.bestLiveTaskIndex(for: action, candidates: tasks)
+      {
+        let task = tasks.remove(at: index)
+        operation.presentation.liveActionTasksByKey[key] = tasks.isEmpty ? nil : tasks
+        operation.presentation.actionIdentities.insert(action.identity)
+        liveEnd = LiveActionEndEmission(
+          id: task.id,
+          metrics: Self.taskMetrics(for: action.timing),
+          signature: task.signature,
+          status: action.succeeded == true ? .succeeded : .failed
+        )
+      } else {
+        operation.presentation.pendingActionCompletionsByKey[key, default: []].append(action)
+      }
+    case .action(let action):
+      if !operation.presentation.actionIdentities.contains(action.identity) {
+        let key = Self.liveActionKey(for: action)
+        if var tasks = operation.presentation.liveActionTasksByKey[key],
+          let index = Self.bestLiveTaskIndex(for: action, candidates: tasks)
+        {
+          let task = tasks.remove(at: index)
+          operation.presentation.liveActionTasksByKey[key] = tasks.isEmpty ? nil : tasks
+          operation.presentation.actionIdentities.insert(action.identity)
+          liveEnd = LiveActionEndEmission(
+            id: task.id,
+            metrics: Self.taskMetrics(for: action.timing),
+            signature: task.signature,
+            status: Self.taskStatus(for: action.disposition)
+          )
+        } else {
+          let pendingCompletion = Self.takePendingCompletion(
+            identity: action.identity,
+            key: key,
+            presentation: &operation.presentation
+          )
+          operation.presentation.actionIdentities.insert(action.identity)
+          let taskID = operation.presentation.nextTaskID
+          operation.presentation.nextTaskID += 1
+          adjacentAction = (
+            BazelPresentedAction(
+              enriching: action,
+              fallbackTiming: pendingCompletion?.timing
+            ),
+            taskID
+          )
+        }
+      }
+    default:
+      break
     }
     operation.inFlightEventCount += 1
     operations[operationID] = operation
@@ -1341,7 +1435,50 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     condition.unlock()
     defer { eventDidFinish(operationID: operationID) }
 
-    if let action = presentedAction, let taskID = actionTaskID {
+    if let liveStart {
+      let actionName = Self.liveActionTitle(liveStart.start)
+      let ruleInfo = [
+        liveStart.start.mnemonic,
+        liveStart.start.label,
+        liveStart.start.executionPlatform,
+      ].joined(separator: " ")
+      try send(
+        SwiftBuildOperationPresenter.encodeTaskStarted(
+          SwiftBuildPresentedTask(
+            commandLineDisplayString: nil,
+            executionDescription: actionName,
+            id: liveStart.task.id,
+            interestingPath: nil,
+            parentID: nil,
+            ruleInfo: ruleInfo,
+            serializedDiagnosticsPaths: [],
+            stableSignature: liveStart.task.signature,
+            targetID: liveStart.task.targetID,
+            taskName: actionName
+          )
+        ),
+        channel: channel,
+        outputs: outputs
+      )
+    }
+
+    if let liveEnd {
+      try send(
+        SwiftBuildOperationPresenter.encodeTaskEnded(
+          id: liveEnd.id,
+          stableSignature: liveEnd.signature,
+          status: liveEnd.status,
+          signalled: false,
+          metrics: liveEnd.metrics
+        ),
+        channel: channel,
+        outputs: outputs
+      )
+    }
+
+    if let adjacentAction {
+      let action = adjacentAction.action
+      let taskID = adjacentAction.taskID
       let signature = "rules_xcodeproj.bazel.action.v1:\(action.identity)"
       let label = action.label.isEmpty ? nil : action.label
       let targetID = label.flatMap { actionLabel in
@@ -1434,6 +1571,8 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     switch event {
     case .action:
       return
+    case .actionStarted:
+      return
     case .actionSummary(let summary):
       try send(
         SwiftBuildOperationPresenter.encodeProgressUpdated(
@@ -1523,6 +1662,182 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     }
   }
 
+  private static func liveActionKey(for start: BazelActionStarted) -> LiveActionJoinKey {
+    LiveActionJoinKey(
+      configuration: start.configuration,
+      label: normalizedLabel(start.label),
+      mnemonic: start.mnemonic
+    )
+  }
+
+  private static func liveActionKey(for action: BEPActionCompleted) -> LiveActionJoinKey {
+    LiveActionJoinKey(
+      configuration: action.configuration,
+      label: normalizedLabel(action.label),
+      mnemonic: action.mnemonic ?? ""
+    )
+  }
+
+  private static func liveActionKey(for action: BazelPresentedAction) -> LiveActionJoinKey {
+    LiveActionJoinKey(
+      configuration: action.configuration,
+      label: normalizedLabel(action.label),
+      mnemonic: action.mnemonic ?? ""
+    )
+  }
+
+  private static func normalizedLabel(_ label: String) -> String {
+    if label.hasPrefix("@@//") { return String(label.dropFirst(2)) }
+    if label.hasPrefix("@//") { return String(label.dropFirst()) }
+    return label
+  }
+
+  private static func targetID(
+    for label: String,
+    operation: OwnedBuildOperation
+  ) -> Int? {
+    let normalized = normalizedLabel(label)
+    return operation.plan.targets.first {
+      normalizedLabel($0.mapping.bazelLabel) == normalized
+    }
+    .flatMap { operation.presentation.targetIDsByGUID[$0.mapping.xcodeTargetGUID] }
+  }
+
+  private static func bestLiveTaskIndex(
+    for action: BEPActionCompleted,
+    candidates: [OpenLiveActionTask]
+  ) -> Int? {
+    bestLiveTaskIndex(
+      primaryOutput: action.primaryOutput,
+      timing: action.timing,
+      candidates: candidates
+    )
+  }
+
+  private static func bestLiveTaskIndex(
+    for action: BazelPresentedAction,
+    candidates: [OpenLiveActionTask]
+  ) -> Int? {
+    bestLiveTaskIndex(
+      primaryOutput: action.primaryOutput,
+      timing: action.timing,
+      candidates: candidates
+    )
+  }
+
+  private static func bestLiveTaskIndex(
+    primaryOutput: String,
+    timing: BazelExecutionTiming?,
+    candidates: [OpenLiveActionTask]
+  ) -> Int? {
+    guard !candidates.isEmpty else { return nil }
+    if candidates.count == 1 { return 0 }
+    let outputHint = actionOutputHint(primaryOutput)
+    if !outputHint.isEmpty {
+      let matching = candidates.indices.filter {
+        candidates[$0].start.description.lowercased().contains(outputHint)
+      }
+      if matching.count == 1 { return matching[0] }
+    }
+    if let timing {
+      let ranked = candidates.indices.sorted {
+        timestampDistance(
+          candidates[$0].start.observedTimeUnixMicroseconds,
+          timing.startTimeUnixMicroseconds
+        )
+          < timestampDistance(
+            candidates[$1].start.observedTimeUnixMicroseconds,
+            timing.startTimeUnixMicroseconds
+          )
+      }
+      if let first = ranked.first,
+        timestampDistance(
+          candidates[first].start.observedTimeUnixMicroseconds,
+          timing.startTimeUnixMicroseconds
+        ) <= 10_000_000
+      {
+        return first
+      }
+    }
+    // Same-key starts are intentionally presented without an output claim. When Bazel's timing is
+    // historical (for example a cache hit) and no output hint is unique, pair completions with the
+    // oldest indistinguishable open slot so every lifecycle remains balanced.
+    return candidates.indices.min {
+      candidates[$0].start.observedTimeUnixMicroseconds
+        < candidates[$1].start.observedTimeUnixMicroseconds
+    }
+  }
+
+  private static func bestCompletionIndex(
+    for start: BazelActionStarted,
+    candidates: [BEPActionCompleted]
+  ) -> Int? {
+    guard !candidates.isEmpty else { return nil }
+    if candidates.count == 1 { return 0 }
+    let matching = candidates.indices.filter {
+      let hint = actionOutputHint(candidates[$0].primaryOutput)
+      return !hint.isEmpty && start.description.lowercased().contains(hint)
+    }
+    if matching.count == 1 { return matching[0] }
+    let ranked = candidates.indices.sorted {
+      let lhs = candidates[$0].timing?.startTimeUnixMicroseconds ?? 0
+      let rhs = candidates[$1].timing?.startTimeUnixMicroseconds ?? 0
+      return timestampDistance(start.observedTimeUnixMicroseconds, lhs)
+        < timestampDistance(start.observedTimeUnixMicroseconds, rhs)
+    }
+    return ranked.first
+  }
+
+  private static func actionOutputHint(_ path: String) -> String {
+    var name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+    for suffix in [".swiftmodule", ".pic.o", ".o", ".a"] where name.hasSuffix(suffix) {
+      name.removeLast(suffix.count)
+      break
+    }
+    return name.count >= 3 ? name : ""
+  }
+
+  private static func timestampDistance(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+    lhs >= rhs ? lhs - rhs : rhs - lhs
+  }
+
+  private static func takePendingCompletion(
+    identity: String,
+    key: LiveActionJoinKey,
+    presentation: inout OwnedOperationPresentation
+  ) -> BEPActionCompleted? {
+    guard var pending = presentation.pendingActionCompletionsByKey[key],
+      let index = pending.firstIndex(where: { $0.identity == identity })
+    else { return nil }
+    let completion = pending.remove(at: index)
+    presentation.pendingActionCompletionsByKey[key] = pending.isEmpty ? nil : pending
+    return completion
+  }
+
+  private static func liveActionTitle(_ start: BazelActionStarted) -> String {
+    let description = start.description.trimmingCharacters(in: .whitespacesAndNewlines)
+    if description.hasPrefix("Compiling ") {
+      return "Compile " + description.dropFirst("Compiling ".count)
+    }
+    if description.hasPrefix("Linking ") {
+      return "Link " + description.dropFirst("Linking ".count)
+    }
+    return description
+  }
+
+  private static func taskStatus(
+    for disposition: BazelActionDisposition
+  ) -> SwiftBuildPresentedTaskStatus {
+    switch disposition {
+    case .cacheHit:
+      return .succeeded
+    case .completed(let succeeded), .executed(let succeeded, _):
+      return succeeded ? .succeeded : .failed
+    case .upToDate:
+      return .succeeded
+    }
+  }
+
   private static func taskMetrics(
     for timing: BazelExecutionTiming?
   ) -> SwiftBuildPresentedTaskMetrics? {
@@ -1608,6 +1923,46 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       channel: operation.responseChannel,
       outputs: outputs
     )
+  }
+
+  private func emitOutstandingActionEnds(
+    operationID: Int,
+    status: ProxyTerminalStatus,
+    outputs: BuildServiceFrameOutputs
+  ) throws {
+    condition.lock()
+    guard var operation = operations[operationID] else {
+      condition.unlock()
+      return
+    }
+    let tasks = operation.presentation.liveActionTasksByKey.values
+      .flatMap { $0 }
+      .sorted { $0.id < $1.id }
+    operation.presentation.liveActionTasksByKey.removeAll()
+    operations[operationID] = operation
+    condition.unlock()
+
+    let taskStatus: SwiftBuildPresentedTaskStatus
+    switch status {
+    case .cancelled:
+      taskStatus = .cancelled
+    case .failed:
+      taskStatus = .failed
+    case .succeeded:
+      taskStatus = .succeeded
+    }
+    for task in tasks {
+      try send(
+        SwiftBuildOperationPresenter.encodeTaskEnded(
+          id: task.id,
+          stableSignature: task.signature,
+          status: taskStatus,
+          signalled: status == .cancelled
+        ),
+        channel: operation.responseChannel,
+        outputs: outputs
+      )
+    }
   }
 
   private func makePresentation(for plan: ResolvedBuildPlan) -> OwnedOperationPresentation {

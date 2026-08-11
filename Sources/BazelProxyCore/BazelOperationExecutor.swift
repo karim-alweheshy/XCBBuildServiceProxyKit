@@ -22,12 +22,14 @@ extension AdapterInvocationFactory: AdapterInvocationPreparing {
 
 public enum BazelOperationExecutionEvent: Equatable, Sendable {
   case action(BazelPresentedAction)
+  case actionStarted(BazelActionStarted)
   case actionSummary(BazelActionPresentationSummary)
   case bep(BEPEvent)
   case processOutput(ProcessOutputEvent)
 }
 
 public enum BazelOperationFailurePhase: String, Equatable, Sendable {
+  case actionStartValidation
   case actionGraphValidation
   case bepValidation
   case clean
@@ -51,6 +53,7 @@ public struct BazelOperationFailure: Equatable, Sendable {
 }
 
 public struct BazelOperationExecutionResult: Equatable, Sendable {
+  public let actionStarts: BazelActionStartValidation?
   public let bep: BEPValidation?
   public let cleanReceipt: CleanReceipt?
   public let configuredActionGraph: ConfiguredActionGraphValidation?
@@ -63,6 +66,7 @@ public struct BazelOperationExecutionResult: Equatable, Sendable {
   public let status: ProxyTerminalStatus
 
   public init(
+    actionStarts: BazelActionStartValidation? = nil,
     bep: BEPValidation? = nil,
     cleanReceipt: CleanReceipt? = nil,
     configuredActionGraph: ConfiguredActionGraphValidation? = nil,
@@ -74,6 +78,7 @@ public struct BazelOperationExecutionResult: Equatable, Sendable {
     productReceipt: ProductReceipt? = nil,
     status: ProxyTerminalStatus
   ) {
+    self.actionStarts = actionStarts
     self.bep = bep
     self.cleanReceipt = cleanReceipt
     self.configuredActionGraph = configuredActionGraph
@@ -180,6 +185,15 @@ public struct BazelOperationExecutor: Sendable {
           onEvent: onEvent
         )
       }
+      let actionStartTask = Task {
+        await Self.followActionStarts(
+          fileAt: invocation.actionStartsURL,
+          process: process,
+          completionSignal: completionSignal,
+          cancellationGrace: grace,
+          onEvent: onEvent
+        )
+      }
       var presentationError: (any Error)?
       do {
         for await event in process.events {
@@ -195,6 +209,7 @@ public struct BazelOperationExecutor: Sendable {
       }
       let completion = await completionTask.value
       let bepOutcome = await bepTask.value
+      let actionStartOutcome = await actionStartTask.value
 
       if Task.isCancelled {
         return BazelOperationExecutionResult(
@@ -211,6 +226,18 @@ public struct BazelOperationExecutor: Sendable {
           processCompletion: completion
         )
       }
+      let actionStarts: BazelActionStartValidation?
+      switch actionStartOutcome {
+      case .success(let validation):
+        actionStarts = validation
+      case .failure(let phase, let message):
+        return failed(
+          phase,
+          BEPEventPresentationError(message: message),
+          operationDirectoryURL: invocation.operationDirectoryURL,
+          processCompletion: completion
+        )
+      }
       if completion.cancellationRequested,
         case .failure(let phase, let message) = bepOutcome
       {
@@ -223,6 +250,7 @@ public struct BazelOperationExecutor: Sendable {
       }
       guard completion.succeeded else {
         return BazelOperationExecutionResult(
+          actionStarts: actionStarts,
           failure: BazelOperationFailure(
             phase: .processExecution,
             message: Self.processFailureMessage(completion)
@@ -379,6 +407,7 @@ public struct BazelOperationExecutor: Sendable {
       } catch {
         if Task.isCancelled {
           return BazelOperationExecutionResult(
+            actionStarts: actionStarts,
             bep: bep,
             configuredActionGraph: configuredActionGraph,
             executionLog: executionLog,
@@ -402,6 +431,7 @@ public struct BazelOperationExecutor: Sendable {
 
       guard bep.result.succeeded else {
         return BazelOperationExecutionResult(
+          actionStarts: actionStarts,
           bep: bep,
           configuredActionGraph: configuredActionGraph,
           failure: BazelOperationFailure(
@@ -417,6 +447,7 @@ public struct BazelOperationExecutor: Sendable {
       }
       guard !Task.isCancelled else {
         return BazelOperationExecutionResult(
+          actionStarts: actionStarts,
           bep: bep,
           configuredActionGraph: configuredActionGraph,
           executionLog: executionLog,
@@ -429,6 +460,7 @@ public struct BazelOperationExecutor: Sendable {
 
       if case .indexBuild = plan.intent.action {
         return BazelOperationExecutionResult(
+          actionStarts: actionStarts,
           bep: bep,
           configuredActionGraph: configuredActionGraph,
           executionLog: executionLog,
@@ -445,6 +477,7 @@ public struct BazelOperationExecutor: Sendable {
           cancellationGate: mutationCancellationGate
         )
         return BazelOperationExecutionResult(
+          actionStarts: actionStarts,
           bep: bep,
           configuredActionGraph: configuredActionGraph,
           executionLog: executionLog,
@@ -456,6 +489,7 @@ public struct BazelOperationExecutor: Sendable {
         )
       } catch ProductMutationCancellationError.cancelledBeforeCommit {
         return BazelOperationExecutionResult(
+          actionStarts: actionStarts,
           bep: bep,
           configuredActionGraph: configuredActionGraph,
           executionLog: executionLog,
@@ -481,6 +515,37 @@ public struct BazelOperationExecutor: Sendable {
       Task {
         _ = await process.cancel(gracePeriod: grace)
       }
+    }
+  }
+
+  private static func followActionStarts(
+    fileAt url: URL,
+    process: any OwnedProcess,
+    completionSignal: AdapterCompletionSignal,
+    cancellationGrace: TimeInterval,
+    onEvent: @escaping EventHandler
+  ) async -> StreamingActionStartOutcome {
+    do {
+      let validation = try await BazelActionStartStreamFollower().follow(
+        fileAt: url,
+        processIsComplete: {
+          await completionSignal.isComplete
+        },
+        onEvent: { start in
+          do {
+            try await onEvent(.actionStarted(start))
+          } catch {
+            throw BEPEventPresentationError(message: error.localizedDescription)
+          }
+        }
+      )
+      return .success(validation)
+    } catch let error as BEPEventPresentationError {
+      _ = await process.cancel(gracePeriod: cancellationGrace)
+      return .failure(.presentation, error.localizedDescription)
+    } catch {
+      _ = await process.cancel(gracePeriod: cancellationGrace)
+      return .failure(.actionStartValidation, error.localizedDescription)
     }
   }
 
@@ -614,4 +679,9 @@ private struct BEPEventPresentationError: LocalizedError, Sendable {
 private enum StreamingBEPOutcome: Sendable {
   case failure(BazelOperationFailurePhase, String)
   case success(BEPValidation)
+}
+
+private enum StreamingActionStartOutcome: Sendable {
+  case failure(BazelOperationFailurePhase, String)
+  case success(BazelActionStartValidation?)
 }

@@ -97,6 +97,20 @@ public struct BazelPresentedAction: Equatable, Sendable {
     self.timing = executionRecord?.timing ?? action.timing
   }
 
+  public init(
+    enriching action: BazelPresentedAction,
+    fallbackTiming: BazelExecutionTiming?
+  ) {
+    self.commandLineDisplayString = action.commandLineDisplayString
+    self.configuration = action.configuration
+    self.disposition = action.disposition
+    self.identity = action.identity
+    self.label = action.label
+    self.mnemonic = action.mnemonic
+    self.primaryOutput = action.primaryOutput
+    self.timing = action.timing ?? fallbackTiming
+  }
+
   public init(upToDate action: BazelConfiguredAction) {
     self.commandLineDisplayString = action.commandLineDisplayString
     self.configuration = action.configuration
