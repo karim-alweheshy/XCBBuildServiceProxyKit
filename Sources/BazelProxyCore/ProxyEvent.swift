@@ -138,6 +138,8 @@ public enum ProxyEventProjection {
           )
         ),
       ]
+    case .buildMetadata:
+      return []
     case .progress(let progress):
       return [.progress(progress)]
     case .reportedExecutedActionCount(let count):

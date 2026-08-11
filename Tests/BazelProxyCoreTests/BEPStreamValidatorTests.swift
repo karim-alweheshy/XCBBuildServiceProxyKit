@@ -6,6 +6,9 @@ import XCTest
 final class BEPStreamValidatorTests: XCTestCase {
   func testIncrementallyParsesAllowlistedEventsAndTerminalResult() throws {
     let lines = [
+      #"{"started":{"uuid":"49603573-5756-46e6-bdb8-fed092d6629d","buildToolVersion":"9.1.1rc1"}}"#,
+      #"{"id":{"structuredCommandLine":{"commandLineLabel":"canonical"}},"structuredCommandLine":{"sections":[{"sectionLabel":"command options","optionList":{"option":[{"optionName":"bes_results_url","optionValue":"https://build.example/invocation/"}]}}]}}"#,
+      #"{"buildMetadata":{"metadata":{"REMOTE_CACHE":"BuildBuddy","PRIVATE_TOKEN":"do-not-retain"}}}"#,
       #"{"progress":{"stderr":"\u001b[32m[1,217 / 1,504]\u001b[0m [Prepa] Compiling App.swift\n"}}"#,
       #"{"id":{"actionCompleted":{"configuration":"sim-arm64","label":"//app:App","primaryOutput":"bazel-out/App.app"}},"action":{"success":true,"type":"SwiftCompile","startTime":"2026-08-11T00:28:11.517582Z","endTime":"2026-08-11T00:29:01.915582Z"}}"#,
       #"{"id":{"targetCompleted":{"label":"//app:App"}},"completed":{"success":true}}"#,
@@ -33,6 +36,27 @@ final class BEPStreamValidatorTests: XCTestCase {
       )
     )
     XCTAssertTrue(events.contains(.reportedExecutedActionCount(7)))
+    XCTAssertTrue(
+      events.contains(
+        .buildMetadata(
+          .invocation(
+            buildToolVersion: "9.1.1rc1",
+            id: "49603573-5756-46e6-bdb8-fed092d6629d"
+          )
+        )
+      )
+    )
+    XCTAssertTrue(
+      events.contains(
+        .buildMetadata(
+          .resultsURL(
+            "https://build.example/invocation/49603573-5756-46e6-bdb8-fed092d6629d"
+          )
+        )
+      )
+    )
+    XCTAssertTrue(events.contains(.buildMetadata(.remoteCache("BuildBuddy"))))
+    XCTAssertFalse(String(describing: events).contains("do-not-retain"))
     XCTAssertTrue(events.contains(.finished(succeeded: true)))
     XCTAssertTrue(
       events.contains(
@@ -133,6 +157,81 @@ final class BEPStreamValidatorTests: XCTestCase {
     let result = try validator.finish()
     XCTAssertTrue(result.succeeded)
     XCTAssertFalse(String(describing: result).contains(secretMarker))
+  }
+
+  func testBuildMetadataRejectsUnsafeURLsAndUnboundedValuesWithoutFailingTheBuild() throws {
+    let secret = "do-not-retain-metadata-secret"
+    let lines = [
+      #"{"started":{"uuid":"49603573-5756-46e6-bdb8-fed092d6629d","buildToolVersion":"9.2.0"}}"#,
+      #"{"id":{"structuredCommandLine":{"commandLineLabel":"original"}},"structuredCommandLine":{"sections":[{"sectionLabel":"command options","optionList":{"option":[{"optionName":"bes_results_url","optionValue":"https://ignored.example/"}]}}]}}"#,
+      #"{"id":{"structuredCommandLine":{"commandLineLabel":"canonical"}},"structuredCommandLine":{"sections":[{"sectionLabel":"command options","optionList":{"option":[{"optionName":"bes_results_url","optionValue":"https://user:"#
+        + secret + #"@build.example/invocation/"}]}}]}}"#,
+      #"{"buildMetadata":{"metadata":{"REMOTE_CACHE":"BuildBuddy\n"#
+        + secret + #""}}}"#,
+      #"{"finished":{"overallSuccess":true}}"#,
+    ]
+    var validator = try BEPStreamValidator()
+    let events = try validator.consume(Data((lines.joined(separator: "\n") + "\n").utf8))
+
+    XCTAssertEqual(
+      events,
+      [
+        .buildMetadata(
+          .invocation(
+            buildToolVersion: "9.2.0",
+            id: "49603573-5756-46e6-bdb8-fed092d6629d"
+          )
+        ),
+        .finished(succeeded: true),
+      ]
+    )
+    XCTAssertFalse(String(describing: events).contains(secret))
+    XCTAssertTrue(try validator.finish().succeeded)
+  }
+
+  func testBuildMetadataAcceptsLocalHTTPAndRejectsAmbiguousResultBases() throws {
+    let invocationID = "49603573-5756-46e6-bdb8-fed092d6629d"
+    let lines = [
+      #"{"started":{"uuid":""# + invocationID + #"","buildToolVersion":"9.2.0"}}"#,
+      #"{"id":{"structuredCommandLine":{"commandLineLabel":"canonical"}},"structuredCommandLine":{"sections":[{"sectionLabel":"command options","optionList":{"option":[{"optionName":"bes_results_url","optionValue":"http://localhost:8080/invocation/"}]}}]}}"#,
+      #"{"id":{"structuredCommandLine":{"commandLineLabel":"canonical"}},"structuredCommandLine":{"sections":[{"sectionLabel":"command options","optionList":{"option":[{"optionName":"bes_results_url","optionValue":"https://one.example/"},{"optionName":"bes_results_url","optionValue":"https://two.example/"}]}}]}}"#,
+      #"{"finished":{"overallSuccess":true}}"#,
+    ]
+    var validator = try BEPStreamValidator()
+    let events = try validator.consume(Data((lines.joined(separator: "\n") + "\n").utf8))
+
+    XCTAssertTrue(
+      events.contains(
+        .buildMetadata(.resultsURL("http://localhost:8080/invocation/" + invocationID))
+      )
+    )
+    XCTAssertFalse(
+      events.contains {
+        guard case .buildMetadata(.resultsURL(let url)) = $0 else { return false }
+        return url.contains("one.example") || url.contains("two.example")
+      }
+    )
+    XCTAssertTrue(try validator.finish().succeeded)
+  }
+
+  func testBuildMetadataCanLinkResultsWhenTheOptionalVersionIsUnsafe() throws {
+    let invocationID = "49603573-5756-46e6-bdb8-fed092d6629d"
+    let lines = [
+      #"{"started":{"uuid":""# + invocationID + #"","buildToolVersion":"9.2.0\nunsafe"}}"#,
+      #"{"id":{"structuredCommandLine":{"commandLineLabel":"canonical"}},"structuredCommandLine":{"sections":[{"sectionLabel":"command options","optionList":{"option":[{"optionName":"bes_results_url","optionValue":"https://build.example/invocation/"}]}}]}}"#,
+      #"{"finished":{"overallSuccess":true}}"#,
+    ]
+    var validator = try BEPStreamValidator()
+    let events = try validator.consume(Data((lines.joined(separator: "\n") + "\n").utf8))
+
+    XCTAssertEqual(
+      events,
+      [
+        .buildMetadata(.resultsURL("https://build.example/invocation/" + invocationID)),
+        .finished(succeeded: true),
+      ]
+    )
+    XCTAssertTrue(try validator.finish().succeeded)
   }
 
   func testAcceptsBoundedLargeIgnoredNamedSetEvent() throws {
@@ -283,6 +382,14 @@ final class BEPStreamValidatorTests: XCTestCase {
       ]
     )
     XCTAssertEqual(
+      ProxyEventProjection.project(
+        .buildMetadata(
+          .invocation(buildToolVersion: "9.2.0", id: "49603573-5756-46e6-bdb8-fed092d6629d")
+        )
+      ),
+      []
+    )
+    XCTAssertEqual(
       ProxyEventProjection.project(.finished(succeeded: false)),
       [
         .lifecycle(.operationStarted),
@@ -355,6 +462,34 @@ final class BEPStreamValidatorTests: XCTestCase {
       XCTAssertEqual(components.count, 3)
       XCTAssertTrue(components.allSatisfy { !$0.isEmpty })
     }
+  }
+
+  func testParsesOptInRealBazelBuildMetadata() throws {
+    guard
+      let path = ProcessInfo.processInfo.environment["BAZEL_PROXY_REAL_METADATA_BEP_PATH"]
+    else {
+      throw XCTSkip("Set BAZEL_PROXY_REAL_METADATA_BEP_PATH to a BuildBuddy-backed Bazel BEP")
+    }
+
+    let validation = try BEPStreamValidator.validate(fileAt: URL(fileURLWithPath: path))
+    XCTAssertTrue(
+      validation.events.contains {
+        guard case .buildMetadata(.invocation) = $0 else { return false }
+        return true
+      }
+    )
+    XCTAssertTrue(
+      validation.events.contains {
+        guard case .buildMetadata(.resultsURL(let url)) = $0 else { return false }
+        return url.hasPrefix("https://") && url.contains("/invocation/")
+      }
+    )
+    XCTAssertTrue(
+      validation.events.contains {
+        guard case .buildMetadata(.remoteCache("BuildBuddy")) = $0 else { return false }
+        return true
+      }
+    )
   }
 }
 

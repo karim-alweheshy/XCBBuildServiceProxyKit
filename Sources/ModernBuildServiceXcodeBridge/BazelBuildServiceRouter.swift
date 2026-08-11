@@ -1597,6 +1597,25 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
       case .actionCompleted(let action):
         _ = action
         return
+      case .buildMetadata(let metadata):
+        let message: String
+        switch metadata {
+        case .invocation(let buildToolVersion, let id):
+          message = "Bazel \(buildToolVersion) — Invocation ID: \(id)"
+        case .remoteCache(let provider):
+          message = "Bazel remote cache: \(provider)"
+        case .resultsURL(let url):
+          message = "Bazel build results: \(url)"
+        }
+        try send(
+          SwiftBuildOperationPresenter.encodeProgressUpdated(
+            statusMessage: message,
+            percentComplete: -1,
+            showInLog: true
+          ),
+          channel: channel,
+          outputs: outputs
+        )
       case .progress(let progress):
         let reportsNoRunningAction =
           progress.activity?.lowercased() == "no actions running"

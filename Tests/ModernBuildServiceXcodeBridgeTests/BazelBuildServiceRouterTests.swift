@@ -225,6 +225,26 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     )
     XCTAssertTrue(
       progressUpdates.contains {
+        $0.statusMessage
+          == "Bazel 9.1.1rc1 — Invocation ID: 49603573-5756-46e6-bdb8-fed092d6629d"
+          && $0.percentComplete == -1
+          && $0.showInLog
+      }
+    )
+    XCTAssertTrue(
+      progressUpdates.contains {
+        $0.statusMessage
+          == "Bazel build results: https://build.example/invocation/49603573-5756-46e6-bdb8-fed092d6629d"
+          && $0.showInLog
+      }
+    )
+    XCTAssertTrue(
+      progressUpdates.contains {
+        $0.statusMessage == "Bazel remote cache: BuildBuddy" && $0.showInLog
+      }
+    )
+    XCTAssertTrue(
+      progressUpdates.contains {
         $0.statusMessage == "Bazel: Compiling App.swift — 1/2 estimated"
           && $0.percentComplete == 50
           && !$0.showInLog
@@ -1532,6 +1552,26 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
       )
     case .succeedWithEvents:
       do {
+        try await onEvent(
+          .bep(
+            .buildMetadata(
+              .invocation(
+                buildToolVersion: "9.1.1rc1",
+                id: "49603573-5756-46e6-bdb8-fed092d6629d"
+              )
+            )
+          )
+        )
+        try await onEvent(
+          .bep(
+            .buildMetadata(
+              .resultsURL(
+                "https://build.example/invocation/49603573-5756-46e6-bdb8-fed092d6629d"
+              )
+            )
+          )
+        )
+        try await onEvent(.bep(.buildMetadata(.remoteCache("BuildBuddy"))))
         try await onEvent(
           .processOutput(
             ProcessOutputEvent(
