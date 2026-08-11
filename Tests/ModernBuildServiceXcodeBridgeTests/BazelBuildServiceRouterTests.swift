@@ -278,6 +278,19 @@ final class BazelBuildServiceRouterTests: XCTestCase {
         $0.statusMessage == "Bazel remote cache: BuildBuddy" && $0.showInLog
       }
     )
+    let remoteCacheIndex = try XCTUnwrap(
+      progressUpdates.firstIndex { $0.statusMessage == "Bazel remote cache: BuildBuddy" }
+    )
+    let restoredProgressIndex = progressUpdates.index(after: remoteCacheIndex)
+    XCTAssertNotEqual(restoredProgressIndex, progressUpdates.endIndex)
+    if restoredProgressIndex != progressUpdates.endIndex {
+      XCTAssertEqual(
+        progressUpdates[restoredProgressIndex].statusMessage,
+        "Building 1 of 2 Bazel actions — Compiling App.swift"
+      )
+      XCTAssertEqual(progressUpdates[restoredProgressIndex].percentComplete, 50)
+      XCTAssertFalse(progressUpdates[restoredProgressIndex].showInLog)
+    }
     XCTAssertTrue(
       progressUpdates.contains {
         $0.statusMessage == "Building 1 of 2 Bazel actions — Compiling App.swift"
@@ -1638,7 +1651,6 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
             )
           )
         )
-        try await onEvent(.bep(.buildMetadata(.remoteCache("BuildBuddy"))))
         try await onEvent(
           .processOutput(
             ProcessOutputEvent(
@@ -1660,6 +1672,7 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
             )
           )
         )
+        try await onEvent(.bep(.buildMetadata(.remoteCache("BuildBuddy"))))
         try await onEvent(
           .bep(
             .progress(

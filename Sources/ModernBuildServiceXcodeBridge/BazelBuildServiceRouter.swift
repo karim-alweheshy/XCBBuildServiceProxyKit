@@ -153,6 +153,7 @@ private struct NativeActiveBuild {
 
 private struct OwnedOperationPresentation: Sendable {
   var actionIdentities = Set<String>()
+  var latestProgress: ProxyProgress?
   var liveActionTasksByKey = [LiveActionJoinKey: [OpenLiveActionTask]]()
   var pendingActionCompletionsByKey = [LiveActionJoinKey: [BEPActionCompleted]]()
   let targetIDsByGUID: [String: Int]
@@ -1438,6 +1439,8 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
           )
         }
       }
+    case .bep(.progress(let progress)):
+      operation.presentation.latestProgress = progress
     default:
       break
     }
@@ -1627,32 +1630,24 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
           channel: channel,
           outputs: outputs
         )
+        if let latestProgress = operation.presentation.latestProgress {
+          let presentation = Self.progressPresentation(for: latestProgress)
+          try send(
+            SwiftBuildOperationPresenter.encodeProgressUpdated(
+              statusMessage: presentation.statusMessage,
+              percentComplete: presentation.percentComplete,
+              showInLog: false
+            ),
+            channel: channel,
+            outputs: outputs
+          )
+        }
       case .progress(let progress):
-        // Match Swift Build's native activity shape so Xcode's top activity display shows the
-        // current numerator and denominator. Bazel can report "no actions running" while it is
-        // between execution waves; that activity text does not invalidate the accompanying
-        // fraction, so keep the progress determinate until the operation's terminal message.
-        let percent =
-          progress.total.map {
-            $0 == 0 ? -1 : min((Double(progress.completed) / Double($0)) * 100, 99)
-          } ?? -1
-        let fraction = progress.total.map {
-          "Building \(progress.completed) of \($0) Bazel actions"
-        }
-        let message: String
-        if let activity = progress.activity, let fraction {
-          message = "\(fraction) — \(activity)"
-        } else if let activity = progress.activity {
-          message = "Bazel: \(activity)"
-        } else if let fraction {
-          message = fraction
-        } else {
-          message = "Bazel progress: \(progress.completed) completed"
-        }
+        let presentation = Self.progressPresentation(for: progress)
         try send(
           SwiftBuildOperationPresenter.encodeProgressUpdated(
-            statusMessage: message,
-            percentComplete: percent,
+            statusMessage: presentation.statusMessage,
+            percentComplete: presentation.percentComplete,
             showInLog: false
           ),
           channel: channel,
@@ -1907,6 +1902,33 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     }
     let seconds = Double(microseconds) / 1_000_000
     return String(format: "%.3f s", locale: Locale(identifier: "en_US_POSIX"), seconds)
+  }
+
+  private static func progressPresentation(
+    for progress: ProxyProgress
+  ) -> (statusMessage: String, percentComplete: Double) {
+    // Match Swift Build's native activity shape so Xcode's top activity display shows the current
+    // numerator and denominator. Bazel can report "no actions running" while it is between
+    // execution waves; that text does not invalidate the accompanying fraction, so keep progress
+    // determinate until the operation's terminal message.
+    let percentComplete =
+      progress.total.map {
+        $0 == 0 ? -1 : min((Double(progress.completed) / Double($0)) * 100, 99)
+      } ?? -1
+    let fraction = progress.total.map {
+      "Building \(progress.completed) of \($0) Bazel actions"
+    }
+    let statusMessage: String
+    if let activity = progress.activity, let fraction {
+      statusMessage = "\(fraction) — \(activity)"
+    } else if let activity = progress.activity {
+      statusMessage = "Bazel: \(activity)"
+    } else if let fraction {
+      statusMessage = fraction
+    } else {
+      statusMessage = "Bazel progress: \(progress.completed) completed"
+    }
+    return (statusMessage, percentComplete)
   }
 
   private static func actionWord(_ count: Int) -> String {
