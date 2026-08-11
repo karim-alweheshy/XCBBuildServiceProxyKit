@@ -478,6 +478,38 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     XCTAssertEqual(try harness.messageName(on: 137), ErrorResponse.name)
   }
 
+  func testPrepareForIndexingQueriesAndBuildsOnlyRequestedTargets() throws {
+    let fixture = try PlanBuilderFixture(includeSecondTarget: true)
+    let harness = RouterHarness(fixture: fixture)
+    harness.settingsOverrides["ACTION"] = "indexbuild"
+    let request = makeCreateBuildRequest(
+      targets: [
+        ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil),
+        ConfiguredTargetMessagePayload(guid: "EXT_GUID", parameters: nil),
+      ],
+      buildCommand: .prepareForIndexing(
+        buildOnlyTheseTargets: ["EXT_GUID"],
+        enableIndexBuildArena: true
+      ),
+      parameters: makeBuildParameters(action: "indexbuild"),
+      responseChannel: 554
+    )
+
+    XCTAssertTrue(try harness.sendClient(request, channel: 134))
+    XCTAssertEqual(try harness.createdID(on: 134), -1)
+
+    let settingsRequests = harness.nativeFrames.compactMap { frame in
+      try? harness.decode(frame, as: AllExportedMacrosAndValuesRequest.self)
+    }
+    XCTAssertEqual(settingsRequests.count, 1)
+    guard case .components(let level, _) = try XCTUnwrap(settingsRequests.first).context,
+      case .target(let guid) = level
+    else {
+      return XCTFail("Expected one target-scoped settings request")
+    }
+    XCTAssertEqual(guid, "EXT_GUID")
+  }
+
   func testBuildDescriptionOnlyForwardsWithoutSettingsQueryDuringOwnedBuild() throws {
     let fixture = try PlanBuilderFixture()
     let harness = RouterHarness(fixture: fixture)

@@ -131,6 +131,30 @@ public enum ResolvedBuildPlanDecision: Equatable, Sendable {
 }
 
 public enum ResolvedBuildPlanBuilder {
+  static func configuredTargets(
+    for request: CreateBuildRequest
+  ) throws -> [ConfiguredTargetMessagePayload] {
+    let configuredTargets = request.request.configuredTargets
+    var configuredByGUID = [String: ConfiguredTargetMessagePayload]()
+    for target in configuredTargets {
+      guard configuredByGUID.updateValue(target, forKey: target.guid) == nil else {
+        throw ResolvedBuildPlanRejection.duplicateConfiguredTarget(target.guid)
+      }
+    }
+
+    guard case .prepareForIndexing(let requestedGUIDs?, _) = request.request.buildCommand else {
+      return configuredTargets
+    }
+
+    // Swift Build treats unknown preparation GUIDs as having no matching configured target. Keep
+    // that behavior while de-duplicating the selection before constructing the Bazel request.
+    var selectedGUIDs = Set<String>()
+    return requestedGUIDs.compactMap { guid in
+      guard selectedGUIDs.insert(guid).inserted else { return nil }
+      return configuredByGUID[guid]
+    }
+  }
+
   public static func resolve(
     operationID: String,
     request: CreateBuildRequest,
@@ -188,7 +212,7 @@ public enum ResolvedBuildPlanBuilder {
       return .forwardNative(.buildDescriptionOnly)
     }
 
-    let configuredTargets = request.request.configuredTargets
+    let configuredTargets = try configuredTargets(for: request)
     guard !configuredTargets.isEmpty else {
       return .forwardNative(.noRequestedTargets)
     }
@@ -310,7 +334,7 @@ public enum ResolvedBuildPlanBuilder {
     case .migrate:
       return .unsupported("migrate")
     case .prepareForIndexing:
-      return .unsupported("prepareForIndexing")
+      return .supported(.indexBuild, .standard, schemeAction: "build")
     case .singleFileBuild:
       return .unsupported("singleFileBuild")
     }

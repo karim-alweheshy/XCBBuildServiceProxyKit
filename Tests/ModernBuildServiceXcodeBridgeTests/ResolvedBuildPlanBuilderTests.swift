@@ -134,22 +134,77 @@ final class ResolvedBuildPlanBuilderTests: XCTestCase {
     XCTAssertEqual(plan.adapterRequest.outputGroups, ["bc app-app", "bi app-app"])
   }
 
-  func testPrepareForIndexingIsNotMisclassifiedAsObservedIndexBuild() throws {
+  func testPrepareForIndexingUsesIndexOutputGroups() throws {
     let fixture = try PlanBuilderFixture()
     let request = makeCreateBuildRequest(
       targets: [ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil)],
       buildCommand: .prepareForIndexing(
         buildOnlyTheseTargets: nil,
         enableIndexBuildArena: true
-      )
+      ),
+      parameters: planParameters(action: "indexbuild")
+    )
+
+    let decision = fixture.resolve(
+      request: request,
+      snapshots: [
+        fixture.snapshot(targetGUID: "APP_GUID", overrides: ["ACTION": "indexbuild"])
+      ]
+    )
+
+    guard case .intercept(let plan) = decision else {
+      return XCTFail("Expected interception, got \(decision)")
+    }
+    XCTAssertEqual(plan.intent.action, .indexBuild)
+    XCTAssertEqual(plan.intent.schemeAction, "build")
+    XCTAssertEqual(plan.adapterRequest.labels, ["//app:App"])
+    XCTAssertEqual(plan.adapterRequest.outputGroups, ["bc app-app", "bi app-app"])
+  }
+
+  func testPrepareForIndexingHonorsRequestedTargetSubset() throws {
+    let fixture = try PlanBuilderFixture(includeSecondTarget: true)
+    let request = makeCreateBuildRequest(
+      targets: [
+        ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil),
+        ConfiguredTargetMessagePayload(guid: "EXT_GUID", parameters: nil),
+      ],
+      buildCommand: .prepareForIndexing(
+        buildOnlyTheseTargets: ["UNKNOWN_GUID", "EXT_GUID", "EXT_GUID"],
+        enableIndexBuildArena: true
+      ),
+      parameters: planParameters(action: "indexbuild")
+    )
+
+    let decision = fixture.resolve(
+      request: request,
+      snapshots: [
+        fixture.snapshot(targetGUID: "EXT_GUID", overrides: ["ACTION": "indexbuild"])
+      ]
+    )
+
+    guard case .intercept(let plan) = decision else {
+      return XCTFail("Expected interception, got \(decision)")
+    }
+    XCTAssertEqual(plan.intent.requestedTargets.map(\.xcodeTargetGUID), ["EXT_GUID"])
+    XCTAssertEqual(plan.adapterRequest.labels, ["//app:Extension"])
+    XCTAssertEqual(plan.adapterRequest.outputGroups, ["bc app-extension", "bi app-extension"])
+    XCTAssertEqual(plan.adapterRequest.targetIDs, ["app-extension"])
+  }
+
+  func testPrepareForIndexingWithNoMatchingTargetsForwardsAsEmptyRequest() throws {
+    let fixture = try PlanBuilderFixture()
+    let request = makeCreateBuildRequest(
+      targets: [ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil)],
+      buildCommand: .prepareForIndexing(
+        buildOnlyTheseTargets: ["UNKNOWN_GUID"],
+        enableIndexBuildArena: true
+      ),
+      parameters: planParameters(action: "indexbuild")
     )
 
     XCTAssertEqual(
-      fixture.resolve(
-        request: request,
-        snapshots: [fixture.snapshot(targetGUID: "APP_GUID")]
-      ),
-      .forwardNative(.unsupportedAction("prepareForIndexing"))
+      fixture.resolve(request: request, snapshots: []),
+      .forwardNative(.noRequestedTargets)
     )
   }
 
