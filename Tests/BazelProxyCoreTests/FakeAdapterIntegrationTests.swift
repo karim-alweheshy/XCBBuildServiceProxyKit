@@ -4,6 +4,50 @@ import XCTest
 @testable import BazelProxyCore
 
 final class FakeAdapterIntegrationTests: XCTestCase {
+  func testExecutorStreamsActionStartBeforeBEPCompletionAndAdapterExit() async throws {
+    let fixture = try ManifestFixture()
+    let source = fixture.workspaceURL.appendingPathComponent(
+      "bazel-out/products/App.app",
+      isDirectory: true
+    )
+    let destination = fixture.rootURL.appendingPathComponent(
+      "DerivedProducts/App.app",
+      isDirectory: true
+    )
+    let paused = fixture.workspaceURL.appendingPathComponent("adapter-paused")
+    let release = fixture.workspaceURL.appendingPathComponent("release-adapter")
+    let plan = try planWithProduct(fixture: fixture, source: source, destination: destination)
+    try setAdapterScript(actionStartStreamingSuccessScript(), fixture: fixture)
+    let collector = ExecutionEventCollector()
+    let executor = BazelOperationExecutor(
+      invocationPreparer: AdapterInvocationFactory(
+        operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+      )
+    )
+    let task = Task {
+      await executor.execute(plan: plan, processEnvironment: [:]) { event in
+        await collector.append(event)
+      }
+    }
+
+    let adapterReachedBarrier = await waitForFile(paused)
+    XCTAssertTrue(adapterReachedBarrier, "adapter did not reach its pre-completion barrier")
+    let actionStartArrived = await waitForActionStart(in: collector)
+    XCTAssertTrue(actionStartArrived, "action start was buffered until BEP completion")
+    let eventsBeforeRelease = await collector.snapshot()
+    XCTAssertFalse(
+      eventsBeforeRelease.contains {
+        guard case .bep(.actionCompleted) = $0 else { return false }
+        return true
+      }
+    )
+    try Data().write(to: release)
+    let result = await task.value
+
+    XCTAssertEqual(result.actionStarts?.starts.count, 1)
+    XCTAssertEqual(result.status, .succeeded, String(describing: result.failure))
+  }
+
   func testExecutorStreamsBEPActionBeforeAdapterExit() async throws {
     let fixture = try ManifestFixture()
     let source = fixture.workspaceURL.appendingPathComponent(
@@ -633,6 +677,31 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     """
   }
 
+  private func actionStartStreamingSuccessScript() -> String {
+    """
+    #!/bin/sh
+    set -eu
+    /bin/mkdir -p "$PWD/bazel-out/products/App.app"
+    printf 'fake-product' > "$PWD/bazel-out/products/App.app/artifact"
+    printf '%s\n' \
+      '{"configuration":"sim-arm64","description":"Assembling App.app","executionPlatform":"@@platforms//host:host","label":"//app:App","mnemonic":"BundleTreeApp","observedTimeUnixMicroseconds":1786438800000000,"schemaVersion":1,"sequence":1}' \
+      > "$SWIFTBUILD_BAZEL_PROXY_ACTION_STARTS_PATH"
+    /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_ACTION_STARTS_PATH"
+    : > "$PWD/adapter-paused"
+    while [[ ! -f "$PWD/release-adapter" ]]; do /bin/sleep 0.01; done
+    printf '%s\n' \
+      '{"id":{"actionCompleted":{"configuration":"sim-arm64","label":"//app:App","primaryOutput":"bazel-out/products/App.app"}},"action":{"success":true,"type":"BundleTreeApp","commandLine":["assemble-app"],"startTime":"2026-08-11T07:40:00Z","endTime":"2026-08-11T07:40:04Z"}}' \
+      '{"id":{"targetCompleted":{"label":"//app:App"}},"completed":{"success":true}}' \
+      '{"buildMetrics":{"actionSummary":{"actionsExecuted":"1"}}}' \
+      '{"finished":{"overallSuccess":true}}' \
+      > "$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
+    /bin/cat > "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT" <<EOF
+    {"bazelrcs":[],"command":"build","commandOptions":["--config=_rules_xcodeproj_build"],"environmentKeys":[],"labels":["//app:App"],"materialization":{"contract":"manifest-v2"},"modes":{"action":"build","config":"_rules_xcodeproj_build","coverage":"NO","previews":"NO"},"outputGroups":["bp app-app","index_import","target_ids_list"],"provenance":{"bepPath":"$SWIFTBUILD_BAZEL_PROXY_BEP_PATH"},"schemaVersion":1,"startupOptions":[],"targetIDs":["app-app"],"targets":["//app:AppProject"],"workingDirectory":"$PWD"}
+    EOF
+    /bin/chmod 600 "$SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
+    """
+  }
+
   private func actionGraphSuccessScript() -> String {
     """
     #!/bin/sh
@@ -745,6 +814,14 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     }
     return false
   }
+
+  private func waitForActionStart(in collector: ExecutionEventCollector) async -> Bool {
+    for _ in 0..<200 {
+      if await collector.containsActionStart() { return true }
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    return false
+  }
 }
 
 private actor ExecutionEventCollector {
@@ -761,6 +838,13 @@ private actor ExecutionEventCollector {
   func containsBEPAction() -> Bool {
     events.contains { event in
       guard case .bep(.actionCompleted) = event else { return false }
+      return true
+    }
+  }
+
+  func containsActionStart() -> Bool {
+    events.contains { event in
+      guard case .actionStarted = event else { return false }
       return true
     }
   }

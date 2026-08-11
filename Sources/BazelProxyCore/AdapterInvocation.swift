@@ -36,6 +36,7 @@ public enum AdapterInvocationError: LocalizedError, Equatable, Sendable {
 }
 
 public struct AdapterInvocation: Equatable, Sendable {
+  public let actionStartsURL: URL
   public let actionGraphURL: URL
   public let arguments: [String]
   public let bepURL: URL
@@ -54,6 +55,7 @@ public struct AdapterInvocation: Equatable, Sendable {
 
 public struct AdapterInvocationFactory: Sendable {
   public static let actionGraphEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_ACTION_GRAPH_PATH"
+  public static let actionStartsEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_ACTION_STARTS_PATH"
   public static let bepEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
   public static let executionLogEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_EXECUTION_LOG_PATH"
   public static let receiptEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
@@ -125,6 +127,7 @@ public struct AdapterInvocationFactory: Sendable {
       )
 
       let actionGraphURL = operationURL.appendingPathComponent("configured-actions.json")
+      let actionStartsURL = operationURL.appendingPathComponent("action-starts.jsonl")
       let bepURL = operationURL.appendingPathComponent("build-event.jsonl")
       let executionLogURL = operationURL.appendingPathComponent("execution-log")
       let receiptURL = operationURL.appendingPathComponent("invocation-receipt.json")
@@ -132,12 +135,14 @@ public struct AdapterInvocationFactory: Sendable {
       if collectConfiguredActions {
         finalEnvironment[Self.actionGraphEnvironmentKey] = actionGraphURL.path
       }
+      finalEnvironment[Self.actionStartsEnvironmentKey] = actionStartsURL.path
       finalEnvironment[Self.requestDirectoryEnvironmentKey] = requestURL.path
       finalEnvironment[Self.bepEnvironmentKey] = bepURL.path
       finalEnvironment[Self.executionLogEnvironmentKey] = executionLogURL.path
       finalEnvironment[Self.receiptEnvironmentKey] = receiptURL.path
 
       return AdapterInvocation(
+        actionStartsURL: actionStartsURL,
         actionGraphURL: actionGraphURL,
         arguments: [],
         bepURL: bepURL,

@@ -9,6 +9,63 @@ import XCTest
 @testable import ModernBuildServiceXcodeBridge
 
 final class BazelBuildServiceRouterTests: XCTestCase {
+  func testLiveActionTaskStartsBeforeCompletionAndEndsOnMatchingBEPEvent() throws {
+    let fixture = try PlanBuilderFixture()
+    let executor = RouterFakeExecutor(behavior: .waitForReleaseAfterActionStart)
+    let harness = RouterHarness(fixture: fixture, executor: executor)
+    let create = makeCreateBuildRequest(
+      targets: [ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil)],
+      responseChannel: 201
+    )
+
+    XCTAssertTrue(try harness.sendClient(create, channel: 101))
+    XCTAssertEqual(try harness.createdID(on: 101), -1)
+    XCTAssertTrue(
+      try harness.sendClient(
+        BuildStartRequest(sessionHandle: create.sessionHandle, id: -1),
+        channel: 102
+      )
+    )
+    XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationTaskStarted.name))
+    let beforeCompletion = harness.xcodeFrames(on: 201)
+    XCTAssertEqual(
+      beforeCompletion.filter { $0.messageName == BuildOperationTaskStarted.name }.count,
+      1
+    )
+    XCTAssertFalse(beforeCompletion.contains { $0.messageName == BuildOperationTaskEnded.name })
+    XCTAssertFalse(beforeCompletion.contains { $0.messageName == BuildOperationEnded.name })
+
+    executor.release.signal()
+    XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationEnded.name))
+    let frames = harness.xcodeFrames(on: 201)
+    let startedIndex = try XCTUnwrap(
+      frames.firstIndex { $0.messageName == BuildOperationTaskStarted.name }
+    )
+    let endedIndex = try XCTUnwrap(
+      frames.firstIndex { $0.messageName == BuildOperationTaskEnded.name }
+    )
+    XCTAssertLessThan(startedIndex, endedIndex)
+    XCTAssertEqual(frames.filter { $0.messageName == BuildOperationTaskStarted.name }.count, 1)
+    XCTAssertEqual(frames.filter { $0.messageName == BuildOperationTaskEnded.name }.count, 1)
+
+    let started = try harness.decode(frames[startedIndex], as: BuildOperationTaskStarted.self)
+    let ended = try harness.decode(frames[endedIndex], as: BuildOperationTaskEnded.self)
+    XCTAssertEqual(started.info.taskName, "Compile Swift module App")
+    XCTAssertEqual(started.info.executionDescription, "Compile Swift module App")
+    XCTAssertEqual(started.info.ruleInfo, "SwiftCompile //app:App @@platforms//host:host")
+    XCTAssertEqual(ended.signature, BuildOperationTaskSignature(rawValue: started.info.signature))
+    XCTAssertEqual(
+      ended.metrics,
+      BuildOperationTaskEnded.Metrics(
+        utime: 0,
+        stime: 0,
+        maxRSS: 0,
+        wcStartTime: 25_000_000,
+        wcDuration: 2_345_678
+      )
+    )
+  }
+
   func testPresentsCacheAndWorkerActionDetailsWithCommands() throws {
     let fixture = try PlanBuilderFixture()
     let executor = RouterFakeExecutor(behavior: .succeedWithDetailedActions)
@@ -1242,6 +1299,54 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     )
   }
 
+  func testCancellationEndsOpenLiveActionBeforeOperationTerminal() throws {
+    let fixture = try PlanBuilderFixture()
+    let executor = RouterFakeExecutor(behavior: .waitForCancellationAfterActionStart)
+    let harness = RouterHarness(fixture: fixture, executor: executor)
+    let request = makeCreateBuildRequest(
+      targets: [ConfiguredTargetMessagePayload(guid: "APP_GUID", parameters: nil)],
+      responseChannel: 1_152
+    )
+    XCTAssertTrue(try harness.sendClient(request, channel: 216))
+    XCTAssertEqual(try harness.createdID(on: 216), -1)
+    XCTAssertTrue(
+      try harness.sendClient(
+        BuildStartRequest(sessionHandle: request.sessionHandle, id: -1),
+        channel: 217
+      )
+    )
+    XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationTaskStarted.name))
+
+    XCTAssertTrue(
+      try harness.sendClient(
+        BuildCancelRequest(sessionHandle: request.sessionHandle, id: -1),
+        channel: 218
+      )
+    )
+    XCTAssertTrue(harness.waitForXcodeMessage(BuildOperationEnded.name))
+
+    let frames = harness.xcodeFrames(on: 1_152)
+    let names = try frames.map(harness.messageName)
+    XCTAssertEqual(names.filter { $0 == BuildOperationTaskStarted.name }.count, 1)
+    XCTAssertEqual(names.filter { $0 == BuildOperationTaskEnded.name }.count, 1)
+    XCTAssertLessThan(
+      try XCTUnwrap(names.firstIndex(of: BuildOperationTaskStarted.name)),
+      try XCTUnwrap(names.firstIndex(of: BuildOperationTaskEnded.name))
+    )
+    XCTAssertLessThan(
+      try XCTUnwrap(names.firstIndex(of: BuildOperationTaskEnded.name)),
+      try XCTUnwrap(names.firstIndex(of: BuildOperationEnded.name))
+    )
+    let taskEnded = try XCTUnwrap(
+      frames
+        .filter { $0.messageName == BuildOperationTaskEnded.name }
+        .compactMap { try? harness.decode($0, as: BuildOperationTaskEnded.self) }
+        .first
+    )
+    XCTAssertEqual(taskEnded.status, .cancelled)
+    XCTAssertTrue(taskEnded.signalled)
+  }
+
   func testPendingCancelAndShutdownHaveOneTerminalEmitter() throws {
     let fixture = try PlanBuilderFixture()
     let harness = RouterHarness(fixture: fixture)
@@ -1376,8 +1481,10 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
     case signalledCancellation
     case succeedWithDetailedActions
     case succeedWithEvents
+    case waitForReleaseAfterActionStart
     case waitForReleaseThenSucceed
     case waitForCancellation
+    case waitForCancellationAfterActionStart
   }
 
   let release = DispatchSemaphore(value: 0)
@@ -1597,7 +1704,76 @@ private final class RouterFakeExecutor: BazelOperationExecuting, @unchecked Send
           status: .failed
         )
       }
+    case .waitForReleaseAfterActionStart:
+      do {
+        try await onEvent(
+          .actionStarted(
+            BazelActionStarted(
+              configuration: "debug",
+              description: "Compiling Swift module App",
+              executionPlatform: "@@platforms//host:host",
+              label: "//app:App",
+              mnemonic: "SwiftCompile",
+              observedTimeUnixMicroseconds: 978_307_225_001_000,
+              sequence: 1
+            )
+          )
+        )
+        await withCheckedContinuation { continuation in
+          DispatchQueue.global(qos: .userInitiated).async { [release] in
+            _ = release.wait(timeout: .now() + 5)
+            continuation.resume()
+          }
+        }
+        let completed = BEPActionCompleted(
+          commandLineDisplayString: "swiftc -c App.swift",
+          configuration: "debug",
+          identity: "//app:App|App.swiftmodule|debug",
+          label: "//app:App",
+          mnemonic: "SwiftCompile",
+          primaryOutput: "App.swiftmodule",
+          succeeded: true,
+          timing: BazelExecutionTiming(
+            startTimeUnixMicroseconds: 978_307_225_000_000,
+            durationMicroseconds: 2_345_678
+          )
+        )
+        try await onEvent(.bep(.actionCompleted(completed)))
+        try await onEvent(.action(BazelPresentedAction(completed: completed)))
+        try await onEvent(.bep(.finished(succeeded: true)))
+        return BazelOperationExecutionResult(status: .succeeded)
+      } catch {
+        return BazelOperationExecutionResult(
+          failure: BazelOperationFailure(phase: .presentation, message: error.localizedDescription),
+          status: .failed
+        )
+      }
     case .waitForCancellation:
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 1_000_000)
+      }
+      return BazelOperationExecutionResult(status: .cancelled)
+    case .waitForCancellationAfterActionStart:
+      do {
+        try await onEvent(
+          .actionStarted(
+            BazelActionStarted(
+              configuration: "debug",
+              description: "Compiling Swift module App",
+              executionPlatform: "@@platforms//host:host",
+              label: "//app:App",
+              mnemonic: "SwiftCompile",
+              observedTimeUnixMicroseconds: 978_307_225_001_000,
+              sequence: 1
+            )
+          )
+        )
+      } catch {
+        return BazelOperationExecutionResult(
+          failure: BazelOperationFailure(phase: .presentation, message: error.localizedDescription),
+          status: .failed
+        )
+      }
       while !Task.isCancelled {
         try? await Task.sleep(nanoseconds: 1_000_000)
       }

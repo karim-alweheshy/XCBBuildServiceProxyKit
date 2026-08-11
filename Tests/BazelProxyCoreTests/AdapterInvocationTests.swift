@@ -56,6 +56,7 @@ final class AdapterInvocationTests: XCTestCase {
       Set(invocation.environment.keys),
       [
         "ACTION", "BAZEL_CONFIG", "HOME", "PATH", "SRCROOT",
+        AdapterInvocationFactory.actionStartsEnvironmentKey,
         AdapterInvocationFactory.bepEnvironmentKey,
         AdapterInvocationFactory.executionLogEnvironmentKey,
         AdapterInvocationFactory.receiptEnvironmentKey,
@@ -63,6 +64,11 @@ final class AdapterInvocationTests: XCTestCase {
       ]
     )
     XCTAssertNil(invocation.environment[AdapterInvocationFactory.actionGraphEnvironmentKey])
+    XCTAssertEqual(
+      invocation.environment[AdapterInvocationFactory.actionStartsEnvironmentKey],
+      invocation.actionStartsURL.path
+    )
+    XCTAssertEqual(invocation.actionStartsURL.lastPathComponent, "action-starts.jsonl")
     XCTAssertEqual(
       invocation.environment[AdapterInvocationFactory.executionLogEnvironmentKey],
       invocation.executionLogURL.path
