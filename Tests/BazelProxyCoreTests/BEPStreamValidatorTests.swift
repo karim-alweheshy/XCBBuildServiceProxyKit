@@ -4,6 +4,13 @@ import XCTest
 @testable import BazelProxyCore
 
 final class BEPStreamValidatorTests: XCTestCase {
+  func testProductionDefaultsBoundBEPFileAndLineSizes() {
+    let limits = BEPStreamLimits()
+
+    XCTAssertEqual(limits.maximumFileBytes, 512 * 1024 * 1024)
+    XCTAssertEqual(limits.maximumLineBytes, 4 * 1024 * 1024)
+  }
+
   func testIncrementallyParsesAllowlistedEventsAndTerminalResult() throws {
     let lines = [
       #"{"started":{"uuid":"49603573-5756-46e6-bdb8-fed092d6629d","buildToolVersion":"9.1.1rc1"}}"#,
