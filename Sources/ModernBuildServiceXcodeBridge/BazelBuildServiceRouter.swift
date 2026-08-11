@@ -631,8 +631,20 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
     operationClass: BuildOperationClass,
     outputs: BuildServiceFrameOutputs
   ) {
+    let configuredTargets: [ConfiguredTargetMessagePayload]
+    do {
+      configuredTargets = try ResolvedBuildPlanBuilder.configuredTargets(for: request)
+    } catch {
+      failResolvingCreate(
+        frame,
+        request: request,
+        message: error.localizedDescription,
+        outputs: outputs
+      )
+      return
+    }
     var snapshots = [PerTargetExportedSettingsSnapshot]()
-    for configuredTarget in request.request.configuredTargets {
+    for configuredTarget in configuredTargets {
       guard !Task.isCancelled, let channel = allocateAuxiliaryChannel() else {
         failResolvingCreate(
           frame,
@@ -2142,6 +2154,7 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
 
   private static func operationClass(for request: CreateBuildRequest) -> BuildOperationClass {
     if request.onlyCreateBuildDescription { return .buildDescription }
+    if case .prepareForIndexing = request.request.buildCommand { return .index }
     return request.request.parameters.action == "indexbuild" ? .index : .normal
   }
 
