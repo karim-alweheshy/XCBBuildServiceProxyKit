@@ -202,9 +202,11 @@ public struct BazelOperationExecutor: Sendable {
         }
       } catch {
         presentationError = error
+        process.events.cancel()
         _ = await process.cancel(gracePeriod: grace)
       }
       if Task.isCancelled {
+        process.events.cancel()
         _ = await process.cancel(gracePeriod: grace)
       }
       let completion = await completionTask.value
