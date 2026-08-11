@@ -44,6 +44,7 @@ public struct AdapterInvocation: Equatable, Sendable {
   public let executionLogURL: URL
   public let executableURL: URL
   public let operationDirectoryURL: URL
+  public let profileURL: URL
   public let receiptURL: URL
   public let requestDirectoryURL: URL
   public let workingDirectoryURL: URL
@@ -58,6 +59,7 @@ public struct AdapterInvocationFactory: Sendable {
   public static let actionStartsEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_ACTION_STARTS_PATH"
   public static let bepEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_BEP_PATH"
   public static let executionLogEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_EXECUTION_LOG_PATH"
+  public static let profileEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_PROFILE_PATH"
   public static let receiptEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_INVOCATION_RECEIPT"
   public static let requestDirectoryEnvironmentKey = "SWIFTBUILD_BAZEL_PROXY_REQUEST_DIR"
 
@@ -130,6 +132,7 @@ public struct AdapterInvocationFactory: Sendable {
       let actionStartsURL = operationURL.appendingPathComponent("action-starts.jsonl")
       let bepURL = operationURL.appendingPathComponent("build-event.jsonl")
       let executionLogURL = operationURL.appendingPathComponent("execution-log")
+      let profileURL = operationURL.appendingPathComponent("bazel-profile.json.gz")
       let receiptURL = operationURL.appendingPathComponent("invocation-receipt.json")
       var finalEnvironment = environment
       if collectConfiguredActions {
@@ -139,6 +142,7 @@ public struct AdapterInvocationFactory: Sendable {
       finalEnvironment[Self.requestDirectoryEnvironmentKey] = requestURL.path
       finalEnvironment[Self.bepEnvironmentKey] = bepURL.path
       finalEnvironment[Self.executionLogEnvironmentKey] = executionLogURL.path
+      finalEnvironment[Self.profileEnvironmentKey] = profileURL.path
       finalEnvironment[Self.receiptEnvironmentKey] = receiptURL.path
 
       return AdapterInvocation(
@@ -150,6 +154,7 @@ public struct AdapterInvocationFactory: Sendable {
         executionLogURL: executionLogURL,
         executableURL: adapterURL,
         operationDirectoryURL: operationURL,
+        profileURL: profileURL,
         receiptURL: receiptURL,
         requestDirectoryURL: requestURL,
         workingDirectoryURL: workspaceURL
