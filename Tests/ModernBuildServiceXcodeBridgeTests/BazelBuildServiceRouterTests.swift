@@ -280,15 +280,15 @@ final class BazelBuildServiceRouterTests: XCTestCase {
     )
     XCTAssertTrue(
       progressUpdates.contains {
-        $0.statusMessage == "Bazel: Compiling App.swift — 1/2 estimated"
+        $0.statusMessage == "Building 1 of 2 Bazel actions — Compiling App.swift"
           && $0.percentComplete == 50
           && !$0.showInLog
       }
     )
     XCTAssertTrue(
       progressUpdates.contains {
-        $0.statusMessage == "Bazel: no actions running — 2/2 estimated"
-          && $0.percentComplete == -1
+        $0.statusMessage == "Building 2 of 2 Bazel actions — no actions running"
+          && $0.percentComplete == 99
           && !$0.showInLog
       }
     )

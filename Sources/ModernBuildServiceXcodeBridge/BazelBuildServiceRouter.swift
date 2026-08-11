@@ -1628,27 +1628,24 @@ public final class BazelBuildServiceRouter: BuildServiceFrameInterceptor, @unche
           outputs: outputs
         )
       case .progress(let progress):
-        let reportsNoRunningAction =
-          progress.activity?.lowercased() == "no actions running"
-        let percent: Double
-        if reportsNoRunningAction {
-          percent = -1
-        } else {
-          percent =
-            progress.total.map {
-              $0 == 0 ? -1 : min((Double(progress.completed) / Double($0)) * 100, 99)
-            } ?? -1
-        }
+        // Match Swift Build's native activity shape so Xcode's top activity display shows the
+        // current numerator and denominator. Bazel can report "no actions running" while it is
+        // between execution waves; that activity text does not invalidate the accompanying
+        // fraction, so keep the progress determinate until the operation's terminal message.
+        let percent =
+          progress.total.map {
+            $0 == 0 ? -1 : min((Double(progress.completed) / Double($0)) * 100, 99)
+          } ?? -1
         let fraction = progress.total.map {
-          "\(progress.completed)/\($0) estimated"
+          "Building \(progress.completed) of \($0) Bazel actions"
         }
         let message: String
         if let activity = progress.activity, let fraction {
-          message = "Bazel: \(activity) — \(fraction)"
+          message = "\(fraction) — \(activity)"
         } else if let activity = progress.activity {
           message = "Bazel: \(activity)"
         } else if let fraction {
-          message = "Bazel progress: \(fraction)"
+          message = fraction
         } else {
           message = "Bazel progress: \(progress.completed) completed"
         }
