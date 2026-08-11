@@ -18,6 +18,33 @@ public struct ProcessOutputEvent: Equatable, Sendable {
   }
 }
 
+public struct ProcessOutputEventStream: AsyncSequence, Sendable {
+  public typealias Element = ProcessOutputEvent
+
+  public struct AsyncIterator: AsyncIteratorProtocol {
+    fileprivate let buffer: BoundedProcessOutputBuffer
+
+    public mutating func next() async -> ProcessOutputEvent? {
+      await buffer.next()
+    }
+  }
+
+  fileprivate let buffer: BoundedProcessOutputBuffer
+
+  fileprivate init(maximumBufferedEvents: Int) {
+    buffer = BoundedProcessOutputBuffer(capacity: maximumBufferedEvents)
+  }
+
+  public func makeAsyncIterator() -> AsyncIterator {
+    AsyncIterator(buffer: buffer)
+  }
+
+  /// Stops delivery and unblocks a producer waiting on backpressure.
+  public func cancel() {
+    buffer.cancel()
+  }
+}
+
 public struct ProcessOutputLimits: Equatable, Sendable {
   public let maximumBufferedEvents: Int
   public let maximumBytesPerChannel: Int
@@ -138,7 +165,7 @@ public enum ProcessLaunchError: LocalizedError, Equatable, Sendable {
 }
 
 public protocol OwnedProcess: Sendable {
-  var events: AsyncStream<ProcessOutputEvent> { get }
+  var events: ProcessOutputEventStream { get }
 
   func cancel(gracePeriod: TimeInterval) async -> ProcessCancellationReceipt
   func wait() async -> ProcessCompletion
@@ -222,6 +249,100 @@ public struct OwnedProcessSupervisor: ProcessSupervising, Sendable {
   }
 }
 
+private final class BoundedProcessOutputBuffer: @unchecked Sendable {
+  private let capacity: Int
+  private let condition = NSCondition()
+  private var events = [ProcessOutputEvent]()
+  private var isCancelled = false
+  private var isFinished = false
+  private var waiter: CheckedContinuation<ProcessOutputEvent?, Never>?
+
+  init(capacity: Int) {
+    self.capacity = capacity
+  }
+
+  /// Blocks a pipe reader when the consumer is behind, applying bounded backpressure to the child.
+  func send(_ event: ProcessOutputEvent) -> Bool {
+    condition.lock()
+    while events.count >= capacity && !isCancelled && !isFinished {
+      condition.wait()
+    }
+    guard !isCancelled, !isFinished else {
+      condition.unlock()
+      return false
+    }
+    if let waiter {
+      self.waiter = nil
+      condition.unlock()
+      waiter.resume(returning: event)
+      return true
+    }
+    events.append(event)
+    condition.unlock()
+    return true
+  }
+
+  func next() async -> ProcessOutputEvent? {
+    await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        condition.lock()
+        if !events.isEmpty {
+          let event = events.removeFirst()
+          condition.signal()
+          condition.unlock()
+          continuation.resume(returning: event)
+          return
+        }
+        if isCancelled || isFinished {
+          condition.unlock()
+          continuation.resume(returning: nil)
+          return
+        }
+        precondition(waiter == nil, "Process output supports one consumer")
+        waiter = continuation
+        condition.unlock()
+      }
+    } onCancel: {
+      self.cancel()
+    }
+  }
+
+  func finish() {
+    condition.lock()
+    let continuation: CheckedContinuation<ProcessOutputEvent?, Never>?
+    if isCancelled || isFinished {
+      continuation = nil
+    } else {
+      isFinished = true
+      condition.broadcast()
+      if events.isEmpty {
+        continuation = waiter
+        waiter = nil
+      } else {
+        continuation = nil
+      }
+    }
+    condition.unlock()
+    continuation?.resume(returning: nil)
+  }
+
+  func cancel() {
+    condition.lock()
+    let continuation: CheckedContinuation<ProcessOutputEvent?, Never>?
+    if isCancelled {
+      continuation = nil
+    } else {
+      isCancelled = true
+      events.removeAll(keepingCapacity: false)
+      condition.broadcast()
+      continuation = waiter
+      waiter = nil
+    }
+    condition.unlock()
+    continuation?.resume(returning: nil)
+  }
+}
+
 private final class OwnedAdapterProcess: OwnedProcess, @unchecked Sendable {
   private struct State {
     var cancellationRequested = false
@@ -236,9 +357,8 @@ private final class OwnedAdapterProcess: OwnedProcess, @unchecked Sendable {
     var waiters = [CheckedContinuation<ProcessCompletion, Never>]()
   }
 
-  let events: AsyncStream<ProcessOutputEvent>
+  let events: ProcessOutputEventStream
 
-  private let continuation: AsyncStream<ProcessOutputEvent>.Continuation
   private let emissionLock = NSLock()
   private let limits: ProcessOutputLimits
   private let lock = NSLock()
@@ -264,11 +384,7 @@ private final class OwnedAdapterProcess: OwnedProcess, @unchecked Sendable {
     self.standardError = standardError
     self.limits = limits
 
-    var capturedContinuation: AsyncStream<ProcessOutputEvent>.Continuation?
-    events = AsyncStream(bufferingPolicy: .bufferingOldest(limits.maximumBufferedEvents)) {
-      capturedContinuation = $0
-    }
-    continuation = capturedContinuation!
+    events = ProcessOutputEventStream(maximumBufferedEvents: limits.maximumBufferedEvents)
 
     startReader(standardOutput, channel: .standardOutput)
     startReader(standardError, channel: .standardError)
@@ -344,24 +460,17 @@ private final class OwnedAdapterProcess: OwnedProcess, @unchecked Sendable {
         }
         let data = Data(bytes: buffer, count: count)
         guard self.recordByteCount(count, channel: channel) else { continue }
-        let yieldResult = self.emissionLock.withLock {
+        let wasEnqueued = self.emissionLock.withLock {
           let sequence = self.lock.withLock { () -> UInt64 in
             self.state.sequence += 1
             return self.state.sequence
           }
-          return self.continuation.yield(
+          return self.events.buffer.send(
             ProcessOutputEvent(bytes: data, channel: channel, sequence: sequence)
           )
         }
-        switch yieldResult {
-        case .enqueued:
-          break
-        case .dropped:
-          self.recordOutputViolation(.bufferLimitExceeded(channel))
-        case .terminated:
+        if !wasEnqueued {
           self.recordOutputViolation(.consumerStopped(channel))
-        @unknown default:
-          self.recordOutputViolation(.bufferLimitExceeded(channel))
         }
       }
     }
@@ -379,7 +488,7 @@ private final class OwnedAdapterProcess: OwnedProcess, @unchecked Sendable {
         try? self.standardOutput.close()
         try? self.standardError.close()
       }
-      self.continuation.finish()
+      self.events.buffer.finish()
       self.complete()
     }
   }

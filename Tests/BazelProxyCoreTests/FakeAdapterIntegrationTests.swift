@@ -784,7 +784,7 @@ final class FakeAdapterIntegrationTests: XCTestCase {
     )
   }
 
-  private func collect(_ stream: AsyncStream<ProcessOutputEvent>) async -> [ProcessOutputEvent] {
+  private func collect(_ stream: ProcessOutputEventStream) async -> [ProcessOutputEvent] {
     var result = [ProcessOutputEvent]()
     for await event in stream {
       result.append(event)

@@ -123,6 +123,69 @@ final class OwnedProcessSupervisorTests: XCTestCase {
     XCTAssertFalse(completion.succeeded)
   }
 
+  func testSlowConsumerAppliesBoundedBackpressureWithoutDroppingOutput() async throws {
+    let fixture = try ManifestFixture()
+    try setAdapterScript(
+      """
+      #!/bin/sh
+      index=0
+      while [ "$index" -lt 256 ]; do
+        printf '0123456789abcdef'
+        index=$((index + 1))
+      done
+      """,
+      fixture: fixture
+    )
+    let invocation = try AdapterInvocationFactory(
+      operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+    ).make(for: fixture.plan(), processEnvironment: [:])
+    let process = try OwnedProcessSupervisor(
+      limits: ProcessOutputLimits(
+        maximumBufferedEvents: 2,
+        maximumBytesPerChannel: 8 * 1024,
+        maximumChunkBytes: 16
+      )
+    ).spawn(invocation)
+
+    try await Task.sleep(nanoseconds: 100_000_000)
+    async let events = collect(process.events)
+    let completion = await process.wait()
+    let capturedEvents = await events
+
+    XCTAssertTrue(completion.succeeded)
+    XCTAssertEqual(completion.outputDisposition, .complete)
+    XCTAssertEqual(completion.standardOutputBytes, 4_096)
+    XCTAssertEqual(
+      output(capturedEvents, channel: .standardOutput),
+      String(repeating: "0123456789abcdef", count: 256)
+    )
+    XCTAssertGreaterThan(capturedEvents.count, 2)
+  }
+
+  func testCancellingConsumerUnblocksBackpressuredReader() async throws {
+    let fixture = try ManifestFixture()
+    try setAdapterScript("#!/bin/sh\nexec /usr/bin/yes x\n", fixture: fixture)
+    let invocation = try AdapterInvocationFactory(
+      operationRootURL: fixture.rootURL.appendingPathComponent("operations")
+    ).make(for: fixture.plan(), processEnvironment: [:])
+    let process = try OwnedProcessSupervisor(
+      limits: ProcessOutputLimits(
+        maximumBufferedEvents: 1,
+        maximumBytesPerChannel: 8 * 1024 * 1024,
+        maximumChunkBytes: 32,
+        violationKillGrace: 0.05
+      )
+    ).spawn(invocation)
+    var iterator = process.events.makeAsyncIterator()
+
+    _ = await iterator.next()
+    process.events.cancel()
+    let completion = await process.wait()
+
+    XCTAssertEqual(completion.outputDisposition, .consumerStopped(.standardOutput))
+    XCTAssertFalse(completion.succeeded)
+  }
+
   func testOutputDrainTimeoutKillsOwnedDescendantAndReturnsBoundedOutcome() async throws {
     let fixture = try ManifestFixture()
     try setAdapterScript(
@@ -180,7 +243,7 @@ final class OwnedProcessSupervisorTests: XCTestCase {
     )
   }
 
-  private func collect(_ stream: AsyncStream<ProcessOutputEvent>) async -> [ProcessOutputEvent] {
+  private func collect(_ stream: ProcessOutputEventStream) async -> [ProcessOutputEvent] {
     var result = [ProcessOutputEvent]()
     for await event in stream {
       result.append(event)
